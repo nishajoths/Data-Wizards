@@ -4,12 +4,50 @@ from PIL import Image
 import pytesseract
 from io import BytesIO
 from pymongo import MongoClient
+import time
 
 def scrape_website(url):
+    # Record start time for network metrics
+    start_time = time.time()
+    network_metrics = {
+        "url": url,
+        "start_time": start_time,
+        "end_time": None,
+        "duration_ms": None,
+        "status_code": None,
+        "content_size_bytes": 0,
+        "speed_kbps": None,
+        "headers": {}
+    }
+    
     # Fetch the webpage content
-    response = requests.get(url)
+    try:
+        response = requests.get(url)
+        # Record network metrics
+        network_metrics["end_time"] = time.time()
+        network_metrics["duration_ms"] = int((network_metrics["end_time"] - network_metrics["start_time"]) * 1000)
+        network_metrics["status_code"] = response.status_code
+        network_metrics["content_size_bytes"] = len(response.content)
+        
+        # Calculate download speed in KB/s
+        if network_metrics["duration_ms"] > 0:
+            network_metrics["speed_kbps"] = (network_metrics["content_size_bytes"] / 1024) / (network_metrics["duration_ms"] / 1000)
+        
+        # Store important headers
+        for header in ["content-type", "server", "cache-control"]:
+            if header in response.headers:
+                network_metrics["headers"][header] = response.headers[header]
+    except Exception as e:
+        return {
+            "error": f"Failed to fetch the webpage: {str(e)}",
+            "network_metrics": network_metrics
+        }
+    
     if response.status_code != 200:
-        return {"error": f"Failed to fetch the webpage. Status code: {response.status_code}"}
+        return {
+            "error": f"Failed to fetch the webpage. Status code: {response.status_code}",
+            "network_metrics": network_metrics
+        }
     
     soup = BeautifulSoup(response.content, 'html.parser')
     
@@ -76,7 +114,8 @@ def scrape_website(url):
             "images": images,
             "image_texts": image_texts,
             "orders": orders  # Include orders in the structured data
-        }
+        },
+        "network_metrics": network_metrics  # Include network metrics in the result
     }
     
     return structured_data

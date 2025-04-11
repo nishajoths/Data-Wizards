@@ -69,7 +69,6 @@ class Robots:
                         })
                 except:
                     continue
-            # Extract sitemap URLs
             elif line.lower().startswith("sitemap:"):
                 try:
                     _, url = line.split(":", 1)

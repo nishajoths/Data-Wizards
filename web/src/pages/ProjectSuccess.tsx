@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Card, Button, Alert } from 'flowbite-react';
+import { Card, Button, Alert, Progress } from 'flowbite-react';
 import { useNavigate, useLocation } from 'react-router-dom';
 import { Link } from 'react-router-dom';
 import { HiCheckCircle, HiExclamationCircle, HiExternalLink, HiInformationCircle } from 'react-icons/hi';
@@ -10,6 +10,8 @@ interface ProcessingStatus {
   pages_found: number;
   pages_scraped: number;
   errors: string[];
+  scrape_mode?: string;
+  pages_limit?: number;
 }
 
 interface ProjectData {
@@ -36,16 +38,37 @@ export default function ProjectSuccess() {
   }, [location, navigate]);
 
   if (!projectData) {
-    return <div>Loading...</div>;
+    return (
+      <div className="min-h-screen bg-gray-50 flex justify-center items-center">
+        <Card className="max-w-md mx-auto text-center">
+          <div>
+            <HiExclamationCircle className="mx-auto h-12 w-12 text-gray-400" />
+            <h3 className="mt-2 text-lg font-medium text-gray-900">No project data available</h3>
+            <p className="mt-1 text-sm text-gray-500">Redirecting to dashboard...</p>
+            <div className="mt-6">
+              <Link to="/dashboard">
+                <Button color="blue">Go to Dashboard</Button>
+              </Link>
+            </div>
+          </div>
+        </Card>
+      </div>
+    );
   }
 
   const { project_id, processing_status } = projectData;
-  const { robots_status, sitemap_status, pages_found, pages_scraped, errors } = processing_status;
+  const { robots_status, sitemap_status, pages_found, pages_scraped, errors, scrape_mode, pages_limit } = processing_status;
 
   const getStatusIcon = (status: string) => {
     if (status === 'success') return <HiCheckCircle className="w-6 h-6 text-green-500" />;
     if (status === 'error' || status === 'failed') return <HiExclamationCircle className="w-6 h-6 text-red-500" />;
     return <HiInformationCircle className="w-6 h-6 text-blue-500" />;
+  };
+
+  const calculateProgressPercentage = () => {
+    if (pages_found === 0) return 100;
+    const percentage = (pages_scraped / pages_found) * 100;
+    return Math.round(percentage);
   };
 
   return (
@@ -94,16 +117,32 @@ export default function ProjectSuccess() {
                 </div>
               </div>
             </div>
+
+            <div className="p-4 border rounded-lg bg-white">
+              <div className="flex items-center">
+                <HiInformationCircle className="w-6 h-6 text-blue-500" />
+                <div className="ml-3">
+                  <h3 className="font-medium">Scraping Mode</h3>
+                  <p className="text-sm text-gray-500">
+                    {scrape_mode === 'all'
+                      ? 'All pages were targeted for scraping'
+                      : `Limited to ${pages_limit || 5} pages`}
+                  </p>
+                </div>
+              </div>
+            </div>
           </div>
 
           <div className="mb-6">
-            <h3 className="font-medium text-lg mb-2">Pages Scraped: {pages_scraped}</h3>
-            <div className="h-2.5 w-full bg-gray-200 rounded-full">
-              <div 
-                className="h-2.5 bg-blue-600 rounded-full" 
-                style={{ width: `${pages_found ? (pages_scraped / pages_found) * 100 : 100}%` }}
-              ></div>
+            <div className="flex justify-between items-center mb-2">
+              <h3 className="font-medium text-lg">Pages Scraped: {pages_scraped}</h3>
+              <span className="text-sm text-gray-600">{calculateProgressPercentage()}% Complete</span>
             </div>
+            <Progress
+              progress={calculateProgressPercentage()}
+              color="blue"
+              size="lg"
+            />
           </div>
 
           {errors.length > 0 && (

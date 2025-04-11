@@ -2,7 +2,8 @@ import { useEffect, useState } from "react";
 import { Button, Card, Spinner, Alert } from "flowbite-react";
 import Cookies from 'js-cookie';
 import { Link } from "react-router-dom";
-import { HiPlus, HiExternalLink, HiInformationCircle } from "react-icons/hi";
+import { HiPlus, HiExternalLink, HiInformationCircle, HiTrash } from "react-icons/hi";
+import DeleteConfirmationModal from "../components/DeleteConfirmationModal";
 
 interface Project {
   _id: string;
@@ -30,65 +31,106 @@ export default function Dashboard() {
     const [projects, setProjects] = useState<Project[]>([]);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
+    const [deleteModalOpen, setDeleteModalOpen] = useState(false);
+    const [projectToDelete, setProjectToDelete] = useState<string | null>(null);
+    const [deleteLoading, setDeleteLoading] = useState(false);
+    const [deleteError, setDeleteError] = useState<string | null>(null);
+
+    const fetchProjects = async () => {
+        try {
+            if (!token) {
+                throw new Error("Authentication token not found");
+            }
+
+            setLoading(true);
+            setError(null);
+
+            // Fetch user information
+            const userRes = await fetch('http://localhost:8000/me', {
+                method: 'GET',
+                headers: {
+                    Authorization: `Bearer ${token}`,
+                },
+            });
+            
+            if (!userRes.ok) {
+                const errorData = await userRes.json().catch(() => ({ detail: "Failed to parse error" }));
+                throw new Error(errorData.detail || "Failed to fetch user information");
+            }
+            
+            const userData = await userRes.json();
+            setName(userData.name);
+            
+            // Fetch projects
+            const projectsRes = await fetch('http://localhost:8000/projects', {
+                method: 'GET',
+                headers: {
+                    Authorization: `Bearer ${token}`,
+                },
+            });
+            
+            if (!projectsRes.ok) {
+                const errorData = await projectsRes.json().catch(() => ({ detail: "Failed to parse error" }));
+                throw new Error(errorData.detail || "Failed to fetch projects");
+            }
+            
+            const projectsData = await projectsRes.json();
+            console.log("Projects data:", projectsData);
+            
+            if (Array.isArray(projectsData.projects)) {
+                setProjects(projectsData.projects);
+            } else {
+                console.warn("Projects data is not an array:", projectsData);
+                setProjects([]);
+            }
+        } catch (error) {
+            console.error("Error fetching data:", error);
+            setError(error instanceof Error ? error.message : "An unknown error occurred");
+        } finally {
+            setLoading(false);
+        }
+    };
 
     useEffect(() => {
-        const fetchData = async () => {
-            try {
-                if (!token) {
-                    throw new Error("Authentication token not found");
-                }
-
-                setLoading(true);
-                setError(null);
-
-                // Fetch user information
-                const userRes = await fetch('http://localhost:8000/me', {
-                    method: 'GET',
-                    headers: {
-                        Authorization: `Bearer ${token}`,
-                    },
-                });
-                
-                if (!userRes.ok) {
-                    const errorData = await userRes.json().catch(() => ({ detail: "Failed to parse error" }));
-                    throw new Error(errorData.detail || "Failed to fetch user information");
-                }
-                
-                const userData = await userRes.json();
-                setName(userData.name);
-                
-                // Fetch projects
-                const projectsRes = await fetch('http://localhost:8000/projects', {
-                    method: 'GET',
-                    headers: {
-                        Authorization: `Bearer ${token}`,
-                    },
-                });
-                
-                if (!projectsRes.ok) {
-                    const errorData = await projectsRes.json().catch(() => ({ detail: "Failed to parse error" }));
-                    throw new Error(errorData.detail || "Failed to fetch projects");
-                }
-                
-                const projectsData = await projectsRes.json();
-                console.log("Projects data:", projectsData);
-                
-                if (Array.isArray(projectsData.projects)) {
-                    setProjects(projectsData.projects);
-                } else {
-                    console.warn("Projects data is not an array:", projectsData);
-                    setProjects([]);
-                }
-            } catch (error) {
-                console.error("Error fetching data:", error);
-                setError(error instanceof Error ? error.message : "An unknown error occurred");
-            } finally {
-                setLoading(false);
-            }
-        };
-        
-        fetchData();
+        fetchProjects();
     }, [token]);
+
+    const handleDeleteClick = (projectId: string) => {
+        setProjectToDelete(projectId);
+        setDeleteModalOpen(true);
+        setDeleteError(null);
+    };
+
+    const handleDeleteConfirm = async () => {
+        if (!projectToDelete || !token) return;
+
+        try {
+            setDeleteLoading(true);
+            setDeleteError(null);
+
+            const response = await fetch(`http://localhost:8000/projects/${projectToDelete}`, {
+                method: 'DELETE',
+                headers: {
+                    Authorization: `Bearer ${token}`,
+                },
+            });
+
+            if (!response.ok) {
+                const errorData = await response.json().catch(() => ({ detail: "Failed to parse error" }));
+                throw new Error(errorData.detail || `Failed to delete project (${response.status})`);
+            }
+
+            // Remove the deleted project from the list
+            setProjects(projects.filter(project => project._id !== projectToDelete));
+            setDeleteModalOpen(false);
+            setProjectToDelete(null);
+        } catch (err) {
+            console.error('Error deleting project:', err);
+            setDeleteError(err instanceof Error ? err.message : 'An error occurred while deleting');
+        } finally {
+            setDeleteLoading(false);
+        }
+    };
 
     if (error) {
         return (
@@ -145,9 +187,19 @@ export default function Dashboard() {
               <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
                 {projects.map((project) => (
                   <Card key={project._id}>
-                    <h5 className="text-lg font-bold text-gray-900 truncate">
-                      {project.title || `Project ${project._id.substring(0, 8)}...`}
-                    </h5>
+                    <div className="flex justify-between items-start">
+                      <h5 className="text-lg font-bold text-gray-900 truncate">
+                        {project.title || `Project ${project._id.substring(0, 8)}...`}
+                      </h5>
+                      <Button 
+                        color="failure" 
+                        size="xs" 
+                        pill 
+                        onClick={() => handleDeleteClick(project._id)}
+                      >
+                        <HiTrash className="h-4 w-4" />
+                      </Button>
+                    </div>
                     
                     <div className="text-sm text-gray-500">
                       <p>URL: {project.url || "Unknown URL"}</p>
@@ -193,6 +245,25 @@ export default function Dashboard() {
               </div>
             )}
           </div>
+        )}
+
+        {/* Delete Confirmation Modal */}
+        <DeleteConfirmationModal 
+          isOpen={deleteModalOpen}
+          onClose={() => setDeleteModalOpen(false)}
+          onConfirm={handleDeleteConfirm}
+          isLoading={deleteLoading}
+        />
+
+        {/* Error Alert for Delete Operation */}
+        {deleteError && (
+          <Alert color="failure" className="mt-4">
+            <div className="flex items-center">
+              <HiInformationCircle className="mr-2 h-5 w-5" />
+              <h3 className="font-medium">Error deleting project</h3>
+            </div>
+            <p className="mt-1">{deleteError}</p>
+          </Alert>
         )}
       </div>
     );

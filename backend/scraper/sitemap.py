@@ -81,62 +81,66 @@ class Sitemap:
         if sitemap_url in self.parsed_sitemaps:
             return
 
-        # 1. Fetch + network metadata
-        start = datetime.now(timezone.utc)
-        resp, ctype = self._fetch(sitemap_url)
-        elapsed = resp.elapsed.total_seconds()
-        length  = len(resp.content)
-        fetched_at = datetime.now(timezone.utc)
+        try:
+            # 1. Fetch + network metadata
+            start = datetime.now(timezone.utc)
+            resp, ctype = self._fetch(sitemap_url)
+            elapsed = resp.elapsed.total_seconds()
+            length  = len(resp.content)
+            fetched_at = datetime.now(timezone.utc)
 
-        # 2. Determine XML vs. page
-        is_xml = ('xml' in ctype) or sitemap_url.lower().endswith('.xml')
-        child_sitemaps = []
-        page_links     = []
+            # 2. Determine XML vs. page
+            is_xml = ('xml' in ctype) or sitemap_url.lower().endswith('.xml')
+            child_sitemaps = []
+            page_links     = []
 
-        if is_xml:
-            soup = BeautifulSoup(resp.content, 'xml')
-            tag = self._detect_url_tag(soup)
-            if tag:
-                for node in soup.find_all(tag):
-                    link = node.get_text(strip=True)
-                    if link.lower().endswith('.xml'):
-                        child_sitemaps.append(link)
-                    else:
-                        page_links.append(link)
-        else:
-            page_links.append(sitemap_url)
+            if is_xml:
+                soup = BeautifulSoup(resp.content, 'xml')
+                tag = self._detect_url_tag(soup)
+                if tag:
+                    for node in soup.find_all(tag):
+                        link = node.get_text(strip=True)
+                        if link.lower().endswith('.xml'):
+                            child_sitemaps.append(link)
+                        else:
+                            page_links.append(link)
+            else:
+                page_links.append(sitemap_url)
 
-        # 3. Insert this sitemap doc
-        sitemap_doc = {
-            "url": sitemap_url,
-            "parent_id": parent_id,
-            "child_sitemaps": [],    # will fill in as we recurse
-            "page_links": page_links,
-            "network_info": {
-                "status_code": resp.status_code,
-                "headers": dict(resp.headers),
-                "cookies": resp.cookies.get_dict(),
-                "elapsed_sec": elapsed,
-                "content_length": length,
-                "fetched_at": fetched_at
+            # 3. Insert this sitemap doc
+            sitemap_doc = {
+                "url": sitemap_url,
+                "parent_id": parent_id,
+                "child_sitemaps": [],    # will fill in as we recurse
+                "page_links": page_links,
+                "network_info": {
+                    "status_code": resp.status_code,
+                    "headers": dict(resp.headers),
+                    "cookies": resp.cookies.get_dict(),
+                    "elapsed_sec": elapsed,
+                    "content_length": length,
+                    "fetched_at": fetched_at
+                }
             }
-        }
-        result = self.sitemaps_col.insert_one(sitemap_doc)
-        this_id = result.inserted_id
+            result = self.sitemaps_col.insert_one(sitemap_doc)
+            this_id = result.inserted_id
 
-        # 4. Link into parent if exists
-        if parent_id:
-            self.sitemaps_col.update_one(
-                {"_id": parent_id},
-                {"$push": {"child_sitemaps": this_id}}
-            )
+            # 4. Link into parent if exists
+            if parent_id:
+                self.sitemaps_col.update_one(
+                    {"_id": parent_id},
+                    {"$push": {"child_sitemaps": this_id}}
+                )
 
-        self.parsed_sitemaps.add(sitemap_url)
-        self.page_urls.update(page_links)
+            self.parsed_sitemaps.add(sitemap_url)
+            self.page_urls.update(page_links)
 
-        # 5. Recurse into child sitemaps
-        for child in child_sitemaps:
-            self.crawl_sitemap(child, parent_id=this_id)
+            # 5. Recurse into child sitemaps
+            for child in child_sitemaps:
+                self.crawl_sitemap(child, parent_id=this_id)
+        except Exception as e:
+            print(f"Error crawling sitemap {sitemap_url}: {e}")
+            self.page_urls.add(sitemap_url)  # Add the URL as a fallback
 
     def fetch_and_store_pages(self):
         """Fetch every page URL, record network info, store in `pages`."""
