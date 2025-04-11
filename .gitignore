@@ -1,0 +1,4 @@
+.env
+backend/__pycache__/
+backend/scraper/__pycache__/
+backend/scraper/*.csv

@@ -1,0 +1,12 @@
+{
+  "manifest_version": 3,
+  "name": "Dashboard Info Fetcher",
+  "version": "1.0",
+  "description": "Fetch dashboard information using stored token.",
+  "permissions": ["cookies", "http://localhost:8000/"],
+  "host_permissions": ["http://localhost:8000/"],
+  "action": {
+    "default_popup": "popup.html"
+    
+  }
+}

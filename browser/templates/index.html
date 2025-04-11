@@ -1,0 +1,116 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Flask + Selenium Controller</title>
+  <style>
+    body { font-family: sans-serif; max-width: 800px; margin: auto; }
+    label { display: block; margin-top: 1em; }
+    input, button, textarea { width: 100%; padding: 0.5em; }
+    #html-output { height: 200px; }
+  </style>
+</head>
+<body>
+  <h1>Remote Selenium Controller</h1>
+
+  <button id="btn-new">Start New Session</button>
+  <p>Session ID: <code id="session-id">—</code></p>
+
+  <label>
+    URL to navigate:
+    <input type="text" id="url" placeholder="https://example.com">
+  </label>
+  <button id="btn-nav">Navigate</button>
+
+  <label>
+    Click selector:
+    <input type="text" id="click-sel" placeholder="button.login">
+  </label>
+  <button id="btn-click">Click Element</button>
+
+  <label>
+    Input selector & text (selector;text):
+    <input type="text" id="input-pair" placeholder="#username;alice">
+  </label>
+  <button id="btn-input">Type Text</button>
+
+  <h2>Rendered HTML</h2>
+  <button id="btn-render">Get HTML</button>
+  <textarea id="html-output" readonly></textarea>
+
+  <h2>Screenshot</h2>
+  <button id="btn-shot">Get Screenshot</button>
+  <div><img id="screenshot" alt="screenshot will appear here"></div>
+
+  <button id="btn-quit" style="margin-top:2em;color:red;">Quit Session</button>
+
+  <script>
+    let sessionId = null;
+
+    async function call(path, opts = {}) {
+      const res = await fetch(path, opts);
+      if (!res.ok) throw new Error(await res.text());
+      const ct = res.headers.get('content-type') || '';
+      if (ct.includes('application/json')) return res.json();
+      return res.text();
+    }
+
+    document.getElementById('btn-new').onclick = async () => {
+      const data = await call('/session', { method: 'POST' });
+      sessionId = data.session_id;
+      document.getElementById('session-id').textContent = sessionId;
+    };
+
+    document.getElementById('btn-nav').onclick = async () => {
+      const url = document.getElementById('url').value;
+      await call('/navigate', {
+        method: 'POST',
+        headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({ session_id: sessionId, url })
+      });
+      alert('Navigated!');
+    };
+
+    document.getElementById('btn-click').onclick = async () => {
+      const sel = document.getElementById('click-sel').value;
+      await call('/click', {
+        method: 'POST',
+        headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({ session_id: sessionId, selector: sel })
+      });
+      alert('Clicked!');
+    };
+
+    document.getElementById('btn-input').onclick = async () => {
+      const [sel, text] = document.getElementById('input-pair').value.split(';');
+      await call('/input', {
+        method: 'POST',
+        headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({ session_id: sessionId, selector: sel, text })
+      });
+      alert('Text entered!');
+    };
+
+    document.getElementById('btn-render').onclick = async () => {
+      const html = await call(`/render?session_id=${sessionId}`);
+      document.getElementById('html-output').value = html;
+    };
+
+    document.getElementById('btn-shot').onclick = async () => {
+      const blob = await fetch(`/screenshot?session_id=${sessionId}`).then(r => r.blob());
+      document.getElementById('screenshot').src = URL.createObjectURL(blob);
+    };
+
+    document.getElementById('btn-quit').onclick = async () => {
+      await call('/quit', {
+        method: 'POST',
+        headers: {'Content-Type':'application/json'},
+        body: JSON.stringify({ session_id: sessionId })
+      });
+      alert('Session closed.');
+      sessionId = null;
+      document.getElementById('session-id').textContent = '—';
+    };
+  </script>
+</body>
+</html>
