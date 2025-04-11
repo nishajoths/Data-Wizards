@@ -9,7 +9,8 @@ import {
   HiCode, 
   HiDownload,
   HiPhotograph,
-  HiDocumentText
+  HiDocumentText,
+  HiChevronRight  // Add this import
 } from 'react-icons/hi';
 
 interface ScrapeConfig {
@@ -50,15 +51,29 @@ export default function DynamicScraper() {
   const [activeTab, setActiveTab] = useState('overview');
   const token = Cookies.get('token');
   
+  const [paginationDetails, setPaginationDetails] = useState<{
+    totalPages: number;
+    currentPage: number;
+    urlsDiscovered: string[];
+    urlsProcessed: string[];
+    paginationMethod: string;
+  }>({
+    totalPages: 0,
+    currentPage: 0,
+    urlsDiscovered: [],
+    urlsProcessed: [],
+    paginationMethod: 'unknown'
+  });
+
   const fetchScrapeData = async () => {
-    if (!scrapeId || !token) {
-      setError("Missing scrape ID or authentication token");
-      setLoading(false);
-      return;
-    }
-    
     try {
+      if (!scrapeId || !token) {
+        throw new Error("Missing scrape ID or authentication token");
+      }
+      
       setLoading(true);
+      console.log(`Fetching scrape data for ID: ${scrapeId}`);
+      
       const response = await fetch(`http://localhost:8000/dynamic_scrapes/${scrapeId}`, {
         headers: {
           Authorization: `Bearer ${token}`
@@ -71,8 +86,23 @@ export default function DynamicScraper() {
       
       const data = await response.json();
       setScrapeData(data);
+      
+      if (data?.scrape?.pagination_progress) {
+        setPaginationDetails({
+          totalPages: data.scrape.pages_scraped || 0,
+          currentPage: data.scrape.pagination_progress.current_page || 0,
+          urlsDiscovered: data.scrape.pagination_progress.urls_discovered || [],
+          urlsProcessed: data.scrape.pagination_progress.urls_processed || [],
+          paginationMethod: data.scrape.pagination_summary?.pagination_method || 'unknown'
+        });
+      }
+      
+      if (data?.scrape?.status === 'running' || data?.scrape?.status === 'queued') {
+        setTimeout(fetchScrapeData, 3000);
+      }
     } catch (err) {
-      setError(err instanceof Error ? err.message : "An unknown error occurred");
+      console.error("Error fetching scrape data:", err);
+      setError(err instanceof Error ? err.message : "An error occurred");
     } finally {
       setLoading(false);
     }
@@ -81,7 +111,6 @@ export default function DynamicScraper() {
   useEffect(() => {
     fetchScrapeData();
     
-    // Poll for updates if scraping is in progress
     const intervalId = setInterval(() => {
       if (scrapeData?.scrape?.status === 'running' || scrapeData?.scrape?.status === 'queued') {
         fetchScrapeData();
@@ -94,7 +123,6 @@ export default function DynamicScraper() {
   const downloadResults = () => {
     if (!scrapeData?.results) return;
     
-    // Format the data for download
     const exportData = scrapeData.results.map(result => ({
       page_number: result.page_number,
       item_number: result.item_number,
@@ -102,11 +130,9 @@ export default function DynamicScraper() {
       ...result.data
     }));
     
-    // Create a JSON file
     const dataStr = JSON.stringify(exportData, null, 2);
     const dataUri = `data:application/json;charset=utf-8,${encodeURIComponent(dataStr)}`;
     
-    // Create download link and trigger download
     const exportFileDefaultName = `scrape-${scrapeId}-${new Date().toISOString().slice(0, 10)}.json`;
     const linkElement = document.createElement('a');
     linkElement.setAttribute('href', dataUri);
@@ -406,6 +432,90 @@ export default function DynamicScraper() {
                     <p className="text-gray-500">No HTML content available</p>
                   </div>
                 )}
+              </div>
+            </div>
+          )}
+        </TabItem>
+        
+        <TabItem
+          title="Pagination"
+          icon={HiChevronRight}
+          active={activeTab === 'pagination'}
+          onClick={() => setActiveTab('pagination')}
+        >
+          {activeTab === 'pagination' && (
+            <div>
+              <h3 className="text-lg font-semibold mb-4">Pagination Details</h3>
+              
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
+                <Card>
+                  <div className="text-center">
+                    <div className="text-3xl font-bold text-blue-600">{paginationDetails.totalPages}</div>
+                    <div className="text-sm text-gray-500">Total Pages Scraped</div>
+                  </div>
+                </Card>
+                
+                <Card>
+                  <div className="text-center">
+                    <div className="text-3xl font-bold text-green-600">{paginationDetails.urlsDiscovered.length}</div>
+                    <div className="text-sm text-gray-500">URLs Discovered</div>
+                  </div>
+                </Card>
+                
+                <Card>
+                  <div className="text-center">
+                    <div className="text-3xl font-bold text-purple-600 capitalize">{paginationDetails.paginationMethod}</div>
+                    <div className="text-sm text-gray-500">Pagination Method</div>
+                  </div>
+                </Card>
+              </div>
+              
+              <div className="space-y-4">
+                <div>
+                  <h4 className="font-medium text-gray-700 mb-2">URLs Processed</h4>
+                  <div className="bg-gray-50 p-3 rounded-lg max-h-64 overflow-y-auto">
+                    {paginationDetails.urlsProcessed.length > 0 ? (
+                      <ol className="list-decimal list-inside space-y-1">
+                        {paginationDetails.urlsProcessed.map((url, index) => (
+                          <li key={index} className="text-sm truncate hover:text-clip hover:overflow-visible">
+                            <a href={url} target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline">
+                              {url}
+                            </a>
+                          </li>
+                        ))}
+                      </ol>
+                    ) : (
+                      <p className="text-gray-500 italic">No URLs processed yet</p>
+                    )}
+                  </div>
+                </div>
+                
+                <div>
+                  <h4 className="font-medium text-gray-700 mb-2">Pagination Flow</h4>
+                  <div className="bg-gray-50 p-3 rounded-lg">
+                    {paginationDetails.urlsDiscovered.length > 0 ? (
+                      <div className="flex flex-col gap-2">
+                        {paginationDetails.urlsDiscovered.map((url, index) => (
+                          <div key={index} className="flex items-center">
+                            <div className="w-8 h-8 rounded-full bg-blue-100 text-blue-800 flex items-center justify-center font-medium mr-3">
+                              {index + 1}
+                            </div>
+                            <div className="flex-1 truncate">
+                              <a href={url} target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline text-sm">
+                                {url}
+                              </a>
+                            </div>
+                            {index < paginationDetails.urlsDiscovered.length - 1 && (
+                              <div className="h-8 border-l-2 border-blue-200 ml-4 mt-8"></div>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    ) : (
+                      <p className="text-gray-500 italic">No pagination links discovered yet</p>
+                    )}
+                  </div>
+                </div>
               </div>
             </div>
           )}
