@@ -3,3 +3,4 @@ backend/__pycache__/
 backend/scraper/__pycache__/
 backend/scraper/*.csv
 base
+*__pycache__
