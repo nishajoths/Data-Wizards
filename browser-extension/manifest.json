@@ -1,12 +1,20 @@
 {
   "manifest_version": 3,
-  "name": "Dashboard Info Fetcher",
-  "version": "1.0",
-  "description": "Fetch dashboard information using stored token.",
-  "permissions": ["cookies", "http://localhost:8000/"],
-  "host_permissions": ["http://localhost:8000/"],
+  "name": "Dynamic Web Scraper",
+  "version": "1.1",
+  "description": "Visually select elements to scrape from websites with pagination support.",
+  "permissions": ["activeTab", "scripting", "cookies", "storage"],
+  "host_permissions": ["<all_urls>", "http://localhost:8000/", "http://localhost:5173/"],
   "action": {
     "default_popup": "popup.html"
-    
+  },
+  "content_scripts": [
+    {
+      "matches": ["<all_urls>"],
+      "js": ["content.js"]
+    }
+  ],
+  "background": {
+    "service_worker": "background.js"
   }
 }

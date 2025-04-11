@@ -18,6 +18,8 @@ from utils.mongodb_utils import serialize_mongo_doc
 from utils.project_utils import get_complete_project_data
 import traceback
 from utils.websocket_manager import ConnectionManager
+import asyncio
+from typing import Optional
 
 app = FastAPI()
 
@@ -61,6 +63,14 @@ class ProjectURL(BaseModel):
 
 class ExtractionInterrupt(BaseModel):
     client_id: str
+
+class DynamicScrapeConfig(BaseModel):
+    url: str
+    cardSelector: str
+    paginationSelector: Optional[str] = None
+    pageHTML: str
+    timestamp: str
+    project_type: Optional[str] = "normal"  # Add project_type field with default "normal"
 
 def verify_password(plain_password, hashed_password):
     return pwd_context.verify(plain_password, hashed_password)
@@ -334,6 +344,102 @@ async def add_project_with_scraping_route(project: ProjectURL, user: dict = Depe
         pages_limit=project.pages_limit
     )
 
+@app.post("/dynamic_scrape")
+async def dynamic_scrape(config: DynamicScrapeConfig, user: dict = Depends(get_current_user)):
+    """Start a dynamic scraping job based on visual selection"""
+    try:
+        # Generate a unique ID for this scraping job
+        scrape_id = str(ObjectId())
+        
+        # Store the configuration
+        scrape_config = {
+            "user_email": user["email"],
+            "user_id": str(user["id"]) if "id" in user else None,
+            "scrape_id": scrape_id,
+            "url": config.url,
+            "card_selector": config.cardSelector,
+            "pagination_selector": config.paginationSelector,
+            "sample_html": config.pageHTML[:50000],  # Store a sample of the HTML (limit size)
+            "status": "queued",
+            "created_at": datetime.utcnow().isoformat(),
+            "pages_scraped": 0,
+            "items_found": 0,
+            "project_type": config.project_type,  # Store project type
+            "errors": []
+        }
+        
+        # Save to MongoDB
+        await db.dynamic_scrapes.insert_one(scrape_config)
+        
+        # Start the scraping process in background
+        asyncio.create_task(run_dynamic_scraper(scrape_id, config.dict(), user["email"]))
+        
+        return {"message": "Dynamic scraping job started", "scrape_id": scrape_id}
+    
+    except Exception as e:
+        print(f"Error starting dynamic scrape: {e}")
+        print(traceback.format_exc())
+        raise HTTPException(status_code=500, detail=f"Failed to start dynamic scraping: {str(e)}")
+
+@app.get("/dynamic_scrapes")
+async def get_dynamic_scrapes(user: dict = Depends(get_current_user)):
+    """Get all dynamic scraping jobs for the current user"""
+    try:
+        cursor = db.dynamic_scrapes.find({"user_email": user["email"]})
+        scrapes = await cursor.to_list(length=100)
+        return {"scrapes": [serialize_mongo_doc(scrape) for scrape in scrapes]}
+    
+    except Exception as e:
+        print(f"Error fetching dynamic scrapes: {e}")
+        print(traceback.format_exc())
+        raise HTTPException(status_code=500, detail=f"Failed to fetch dynamic scrapes: {str(e)}")
+
+@app.get("/dynamic_scrapes/{scrape_id}")
+async def get_dynamic_scrape(scrape_id: str, user: dict = Depends(get_current_user)):
+    """Get a specific dynamic scraping job and its results"""
+    try:
+        # Get the scrape configuration
+        scrape = await db.dynamic_scrapes.find_one({"scrape_id": scrape_id, "user_email": user["email"]})
+        if not scrape:
+            raise HTTPException(status_code=404, detail="Scraping job not found")
+        
+        # Get the scrape results
+        cursor = db.dynamic_scrape_results.find({"scrape_id": scrape_id})
+        results = await cursor.to_list(length=1000)
+        
+        return {
+            "scrape": serialize_mongo_doc(scrape),
+            "results": [serialize_mongo_doc(result) for result in results]
+        }
+    
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error fetching dynamic scrape: {e}")
+        print(traceback.format_exc())
+        raise HTTPException(status_code=500, detail=f"Failed to fetch dynamic scrape: {str(e)}")
+
+@app.post("/store_extracted_data")
+async def store_extracted_data(data: dict, user: dict = Depends(get_current_user)):
+    try:
+        project_id = data.get("project_id")
+        extracted_data = data.get("data")
+        if not project_id or not extracted_data:
+            raise HTTPException(status_code=400, detail="Project ID and data are required")
+        
+        project = await projects_collection.find_one({"_id": ObjectId(project_id)})
+        if not project or project["user_email"] != user["email"]:
+            raise HTTPException(status_code=403, detail="Not authorized to update this project")
+        
+        await projects_collection.update_one(
+            {"_id": ObjectId(project_id)},
+            {"$push": {"extracted_data": {"$each": extracted_data}}}
+        )
+        return {"message": "Data stored successfully"}
+    except Exception as e:
+        print(f"Error storing extracted data: {e}")
+        raise HTTPException(status_code=500, detail="Failed to store data")
+
 log_file = "page_sources.json"
 
 class PageSource(BaseModel):
@@ -368,7 +474,7 @@ async def live_logs():
     <html lang="en">
     <head>
         <meta charset="UTF-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <meta name="viewport" width="device-width, initial-scale=1.0">
         <title>Live Logs</title>
     </head>
     <body>
