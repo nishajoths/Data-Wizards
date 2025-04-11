@@ -128,11 +128,15 @@ function selectElement(element) {
     });
     
     selectedCardElement = element;
+    selectedCardSelector = generateSelector(element);
     element.classList.add('scraper-selected-card');
     
     // Find similar elements (cards) based on the selected element
     findSimilarElements(element);
     updateStatus(`Card selected! (Found ${similiarElements.length} similar cards)`);
+    
+    // Notify popup about completed selection
+    selectionCompleted('card', selectedCardSelector, similiarElements.length);
   } else if (selectionMode === 'pagination') {
     // Remove previous pagination selection
     document.querySelectorAll('.scraper-selected-pagination').forEach(el => {
@@ -140,8 +144,12 @@ function selectElement(element) {
     });
     
     selectedPaginationElement = element;
+    selectedPaginationSelector = generateSelector(element);
     element.classList.add('scraper-selected-pagination');
     updateStatus('Pagination element selected!');
+    
+    // Notify popup about completed selection
+    selectionCompleted('pagination', selectedPaginationSelector, 1);
   }
   
   // Check if we can enable the Start button
@@ -309,29 +317,81 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   }
 
   if (message.action === "startCardSelection") {
-    startSelection((selector) => {
-      selectedCardSelector = selector;
-      sendResponse({ success: true });
-      chrome.runtime.sendMessage({ action: "enableExtractButton" });
-    });
+    startSelection('card');
+    sendResponse({ success: true });
+    chrome.runtime.sendMessage({ action: "selectionStarted", mode: "card" });
     return true;
   }
 
   if (message.action === "startPaginationSelection") {
-    startSelection((selector) => {
-      selectedPaginationSelector = selector;
-      sendResponse({ success: true });
-    });
+    startSelection('pagination');
+    sendResponse({ success: true });
+    chrome.runtime.sendMessage({ action: "selectionStarted", mode: "pagination" });
     return true;
   }
 
   if (message.action === "extractData") {
-    const cards = document.querySelectorAll(selectedCardSelector);
-    const data = Array.from(cards).map((card) => card.innerText);
-    chrome.runtime.sendMessage({ action: "dataExtracted", data });
-    sendResponse({ success: true });
+    if (!selectedCardSelector && !selectedCardElement) {
+      sendResponse({ success: false, error: "No card elements selected" });
+      return true;
+    }
+    
+    // Use either the generated selector or create one from the selected element
+    const cardSelector = selectedCardSelector || generateSelector(selectedCardElement);
+    const paginationSelector = selectedPaginationSelector || 
+                             (selectedPaginationElement ? generateSelector(selectedPaginationElement) : null);
+    
+    // Collect data from the page
+    const cards = document.querySelectorAll(cardSelector);
+    const extractedData = Array.from(cards).map(card => {
+      return {
+        text: card.innerText,
+        html: card.innerHTML,
+        links: Array.from(card.querySelectorAll('a')).map(a => a.href),
+        images: Array.from(card.querySelectorAll('img')).map(img => img.src)
+      };
+    });
+    
+    // Prepare data extraction config
+    const extractionData = {
+      url: window.location.href,
+      cardSelector: cardSelector,
+      paginationSelector: paginationSelector,
+      pageHTML: document.documentElement.outerHTML,
+      extractedData: extractedData,
+      timestamp: new Date().toISOString(),
+      project_type: "extension",
+      user_id: userInfo?.userId || null,
+      user_email: userInfo?.userEmail || null,
+      token: userInfo?.token || null
+    };
+    
+    // Send data to background script for processing
+    chrome.runtime.sendMessage({ 
+      action: "startScraping", 
+      config: extractionData 
+    }, response => {
+      sendResponse({ 
+        success: !!response?.success,
+        data: response?.data,
+        error: response?.error
+      });
+    });
+    
+    return true;
   }
 });
+
+// After selection completed notification
+function selectionCompleted(type, selector, count) {
+  // Notify popup about completed selection
+  chrome.runtime.sendMessage({ 
+    action: "selectionCompleted", 
+    type: type,
+    selector: selector,
+    count: count
+  });
+}
 
 // Set up event listeners
 document.addEventListener('mouseover', (e) => {

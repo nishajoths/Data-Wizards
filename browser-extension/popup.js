@@ -12,6 +12,10 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   let currentTabId = null;
 
+  // Selection status tracking
+  let cardSelectionComplete = false;
+  let paginationSelectionComplete = false;
+
   // Helper function to update status message
   function updateStatus(message) {
     if (statusElement) {
@@ -133,6 +137,7 @@ document.addEventListener("DOMContentLoaded", async () => {
         chrome.tabs.sendMessage(currentTabId, { action: "activateSelector" }, (response) => {
           if (response && response.success) {
             updateStatus("Inspector activated! Select elements to scrape.");
+            // Keep popup open, don't call window.close()
           } else {
             updateStatus("Failed to activate inspector.");
           }
@@ -154,6 +159,7 @@ document.addEventListener("DOMContentLoaded", async () => {
         chrome.tabs.sendMessage(currentTabId, { action: "startCardSelection" }, (response) => {
           if (response?.success) {
             updateStatus("Card selection activated. Click on a repetitive element.");
+            // Keep popup open, don't call window.close()
           } else {
             updateStatus("Failed to activate card selection.");
           }
@@ -175,6 +181,7 @@ document.addEventListener("DOMContentLoaded", async () => {
         chrome.tabs.sendMessage(currentTabId, { action: "startPaginationSelection" }, (response) => {
           if (response?.success) {
             updateStatus("Pagination selection activated. Click on a pagination element.");
+            // Keep popup open, don't call window.close()
           } else {
             updateStatus("Failed to activate pagination selection.");
           }
@@ -192,12 +199,16 @@ document.addEventListener("DOMContentLoaded", async () => {
       if (!currentTabId) return;
 
       try {
+        updateStatus("Starting extraction process...");
+        
         await ensureContentScriptLoaded(currentTabId);
         chrome.tabs.sendMessage(currentTabId, { action: "extractData" }, (response) => {
           if (response?.success) {
             updateStatus("Data extraction started. Check dashboard for progress.");
+            // NOW you can close the popup since the project is created and extraction is started
+            setTimeout(() => window.close(), 2000);
           } else {
-            updateStatus("Failed to start data extraction.");
+            updateStatus(response?.error || "Failed to start data extraction.");
           }
         });
       } catch (error) {
@@ -206,6 +217,41 @@ document.addEventListener("DOMContentLoaded", async () => {
       }
     });
   }
+
+  // Listen for messages from the content script about selection status
+  chrome.runtime.onMessage.addListener((message) => {
+    if (message.action === "selectionCompleted") {
+      if (message.type === "card") {
+        cardSelectionComplete = true;
+        selectCardsButton.classList.add("selected");
+        selectCardsButton.innerHTML = `<div class="icon-text">
+          <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <rect x="3" y="3" width="18" height="18" rx="2" ry="2"></rect>
+            <path d="M3 9h18"></path>
+          </svg>
+          Cards Selected (${message.count})
+        </div>`;
+        updateStatus(`Cards selected! Found ${message.count} similar elements.`);
+      }
+      
+      if (message.type === "pagination") {
+        paginationSelectionComplete = true;
+        selectPaginationButton.classList.add("selected");
+        selectPaginationButton.innerHTML = `<div class="icon-text">
+          <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+            <polyline points="9 18 15 12 9 6"></polyline>
+          </svg>
+          Pagination Selected
+        </div>`;
+        updateStatus("Pagination selected!");
+      }
+      
+      // Enable extract button if cards have been selected
+      if (cardSelectionComplete && extractDataButton) {
+        extractDataButton.disabled = false;
+      }
+    }
+  });
 
   // Listen for messages from the content script
   chrome.runtime.onMessage.addListener((message) => {
