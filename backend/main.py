@@ -23,6 +23,7 @@ from typing import Optional
 from modules.groq import ScrapingAssistant
 import aiohttp
 import re
+from scraper.dynamic_scraper import run_dynamic_scraper
 
 app = FastAPI()
 
@@ -136,7 +137,13 @@ async def get_current_user(token: str = Depends(oauth2_scheme)):
 
 @app.get("/me")
 async def get_me(user: dict = Depends(get_current_user)):
-    return {"name": user["name"]}
+    # Return complete user information including ID
+    return {
+        "name": user["name"],
+        "email": user["email"],
+        "id": str(user["_id"]),  # Convert ObjectId to string
+        "projects": user.get("projects", [])
+    }
 
 @app.post("/add_project")
 async def add_project(user: dict = Depends(get_current_user), project_data: dict = None):
@@ -535,10 +542,13 @@ async def dynamic_scrape(config: DynamicScrapeConfig, user: dict = Depends(get_c
         # Generate a unique ID for this scraping job
         scrape_id = str(ObjectId())
         
+        # Ensure project_type is set (default to "extension" if not provided)
+        project_type = config.project_type or "extension"
+        
         # Store the configuration
         scrape_config = {
             "user_email": user["email"],
-            "user_id": str(user["id"]) if "id" in user else None,
+            "user_id": str(user["_id"]), 
             "scrape_id": scrape_id,
             "url": config.url,
             "card_selector": config.cardSelector,
@@ -548,17 +558,20 @@ async def dynamic_scrape(config: DynamicScrapeConfig, user: dict = Depends(get_c
             "created_at": datetime.utcnow().isoformat(),
             "pages_scraped": 0,
             "items_found": 0,
-            "project_type": config.project_type,  # Store project type
+            "project_type": project_type,  # Store project type from request
             "errors": []
         }
         
         # Save to MongoDB
         await db.dynamic_scrapes.insert_one(scrape_config)
         
+        # Log the project type for debugging
+        print(f"Creating dynamic scrape with project_type: {project_type}")
+        
         # Start the scraping process in background
         asyncio.create_task(run_dynamic_scraper(scrape_id, config.dict(), user["email"]))
         
-        return {"message": "Dynamic scraping job started", "scrape_id": scrape_id}
+        return {"message": "Dynamic scraping job started", "scrape_id": scrape_id, "project_type": project_type}
     
     except Exception as e:
         print(f"Error starting dynamic scrape: {e}")

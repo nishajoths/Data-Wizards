@@ -1,24 +1,104 @@
 .scraper-highlight {
-  outline: 2px dashed red !important;
-  background-color: rgba(255, 0, 0, 0.1) !important;
+  outline: 3px dashed #ff5722 !important;
+  background-color: rgba(255, 87, 34, 0.1) !important;
   cursor: pointer !important;
   position: relative !important;
   z-index: 9998 !important;
+  transition: outline-color 0.2s ease !important;
+}
+
+/* Selection button that appears on hover */
+.scraper-select-button {
+  position: absolute !important;
+  z-index: 10000 !important;
+  background-color: #4CAF50 !important;
+  color: white !important;
+  border: none !important;
+  border-radius: 4px !important;
+  padding: 8px 12px !important;
+  font-size: 14px !important;
+  font-weight: bold !important;
+  cursor: pointer !important;
+  box-shadow: 0 2px 5px rgba(0,0,0,0.3) !important;
+  animation: button-pop 0.3s ease-out !important;
+  transition: background-color 0.2s, transform 0.1s !important;
+}
+
+.scraper-select-button:hover {
+  background-color: #45a049 !important;
+  transform: scale(1.05) !important;
+}
+
+.scraper-select-button:active {
+  transform: scale(0.98) !important;
+}
+
+@keyframes button-pop {
+  0% { opacity: 0; transform: scale(0.8) translateY(10px); }
+  70% { opacity: 1; transform: scale(1.05) translateY(-2px); }
+  100% { opacity: 1; transform: scale(1) translateY(0); }
 }
 
 .scraper-selected-card {
-  outline: 2px solid #ff5722 !important;
-  background-color: rgba(255, 87, 34, 0.1) !important;
+  outline: 3px solid #ff5722 !important;
+  background-color: rgba(255, 87, 34, 0.15) !important;
+  box-shadow: 0 0 10px rgba(255, 87, 34, 0.5) !important;
+  position: relative !important;
+  z-index: 9999 !important;
+}
+
+.scraper-selected-card::after {
+  content: "Selected Card" !important;
+  position: absolute !important;
+  top: -25px !important;
+  left: 0 !important;
+  background-color: #ff5722 !important;
+  color: white !important;
+  padding: 2px 6px !important;
+  font-size: 10px !important;
+  border-radius: 3px !important;
+  pointer-events: none !important;
 }
 
 .scraper-selected-pagination {
-  outline: 2px solid #2196f3 !important;
-  background-color: rgba(33, 150, 243, 0.1) !important;
+  outline: 3px solid #2196f3 !important;
+  background-color: rgba(33, 150, 243, 0.15) !important;
+  box-shadow: 0 0 10px rgba(33, 150, 243, 0.5) !important;
+  position: relative !important;
+  z-index: 9999 !important;
+}
+
+.scraper-selected-pagination::after {
+  content: "Selected Pagination" !important;
+  position: absolute !important;
+  top: -25px !important;
+  left: 0 !important;
+  background-color: #2196f3 !important;
+  color: white !important;
+  padding: 2px 6px !important;
+  font-size: 10px !important;
+  border-radius: 3px !important;
+  pointer-events: none !important;
 }
 
 .scraper-similar-card {
   outline: 1px dashed #ff5722 !important;
   background-color: rgba(255, 87, 34, 0.05) !important;
+}
+
+/* Extraction highlight style */
+.scraper-extraction-highlight {
+  outline: 3px dashed #ff0000 !important;
+  background-color: rgba(255, 0, 0, 0.1) !important;
+  position: relative !important;
+  z-index: 9990 !important;
+  animation: pulse-red 1s ease-in-out infinite !important;
+}
+
+@keyframes pulse-red {
+  0% { outline-color: rgba(255, 0, 0, 0.6) !important; }
+  50% { outline-color: rgba(255, 0, 0, 1) !important; }
+  100% { outline-color: rgba(255, 0, 0, 0.6) !important; }
 }
 
 .scraper-toolbar {
