@@ -733,7 +733,7 @@ export default function ProjectDetails() {
           )}
         </TabItem>
 
-        {/* <TabItem 
+        <TabItem 
           title="Images" 
           icon={HiPhotograph}
           active={activeTab === 'images'}
@@ -779,7 +779,7 @@ export default function ProjectDetails() {
               )}
             </div>
           )}
-        </TabItem> */}
+        </TabItem>
 
         <TabItem 
           title="Data Flow" 

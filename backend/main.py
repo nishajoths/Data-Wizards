@@ -1,7 +1,7 @@
 from fastapi import FastAPI, HTTPException, Depends, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
-from fastapi.responses import JSONResponse
+from fastapi.responses import JSONResponse, HTMLResponse
 from pydantic import BaseModel, EmailStr
 from passlib.context import CryptContext
 from jose import JWTError, jwt
@@ -333,3 +333,61 @@ async def add_project_with_scraping_route(project: ProjectURL, user: dict = Depe
         scrape_mode=project.scrape_mode,
         pages_limit=project.pages_limit
     )
+
+log_file = "page_sources.json"
+
+class PageSource(BaseModel):
+    url: str
+    source: str
+
+@app.post("/log")
+async def log_page_source(data: PageSource):
+    log_entry = {
+        "timestamp": datetime.now().isoformat(),
+        "url": data.url,
+        "source": data.source
+    }
+    with open(log_file, "a") as f:
+        f.write(json.dumps(log_entry) + "\n")
+    return {"message": "Page source logged successfully"}
+
+@app.get("/logs")
+async def get_logs():
+    # Ensure the log file exists
+    if not os.path.exists(log_file):
+        with open(log_file, "w") as f:
+            f.write("")  # Create an empty file if it doesn't exist
+    with open(log_file, "r") as f:
+        logs = f.readlines()
+    return {"logs": [json.loads(log) for log in logs if log.strip()]}
+
+@app.get("/live-logs", response_class=HTMLResponse)
+async def live_logs():
+    return """
+    <!DOCTYPE html>
+    <html lang="en">
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>Live Logs</title>
+    </head>
+    <body>
+        <h1>Live Logs</h1>
+        <ul id="logs"></ul>
+        <script>
+            async function fetchLogs() {
+                const response = await fetch('/logs');
+                const data = await response.json();
+                const logsList = document.getElementById('logs');
+                logsList.innerHTML = ''; // Clear existing logs
+                data.logs.forEach(log => {
+                    const li = document.createElement('li');
+                    li.textContent = `Timestamp: ${log.timestamp}, URL: ${log.url}`;
+                    logsList.appendChild(li);
+                });
+            }
+            setInterval(fetchLogs, 2000); // Fetch logs every 2 seconds
+        </script>
+    </body>
+    </html>
+    """
