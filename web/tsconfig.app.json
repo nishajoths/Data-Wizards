@@ -22,5 +22,5 @@
     "noFallthroughCasesInSwitch": true,
     "noUncheckedSideEffectImports": true
   },
-  "include": ["src"]
+  "include": ["src", "../base/src/pages/InternshipDetail.tsx", "../base/src/pages/Internships.tsx", "../base/src/pages/Terms.tsx", "../base/src/pages/HomePage.tsx"]
 }

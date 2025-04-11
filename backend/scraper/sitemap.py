@@ -2,33 +2,57 @@ import requests
 from bs4 import BeautifulSoup
 from urllib.parse import urlparse
 from pymongo import MongoClient
-from datetime import datetime, timezone
+from datetime import datetime, timezone, UTC
 import os
+import traceback
 
 class Sitemap:
     def __init__(self, start_url,
                  mongo_uri="mongodb://localhost:27017",
                  db_name="hackathon"):
         self.start_url = start_url
-        if not self.start_url.startswith("http"):
-            raise ValueError("start_url must be a valid HTTP(S) URL")
-        if not str.lower(self.start_url).endswith("sitemap"):
-            self.start_url += "/sitemap.xml"
-            
-        req = requests.get(self.start_url)
-        if req.status_code != 200:
-            raise ValueError(f"No sitemap found")
+        self.page_urls = set([start_url])  # Initialize with at least the start URL
         self.parsed_sitemaps = set()
-        self.page_urls = set()
-
-        # MongoDB setup
-        client = MongoClient(mongo_uri)
-        db = client[db_name]
-        self.sitemaps_col = db["sitemaps"]
-        self.pages_col    = db["pages"]
         
-        self.run()
-        return self.pages_col
+        try:
+            if not self.start_url.startswith("http"):
+                self.start_url = "https://" + self.start_url
+                
+            # Make the sitemap URL if not already a sitemap
+            if not str.lower(self.start_url).endswith("sitemap.xml"):
+                sitemap_url = self.start_url
+                if not sitemap_url.endswith('/'):
+                    sitemap_url += '/'
+                sitemap_url += "sitemap.xml"
+            else:
+                sitemap_url = self.start_url
+                
+            # Try to get the sitemap
+            try:
+                req = requests.get(sitemap_url, timeout=10)
+                if req.status_code == 200:
+                    self.start_url = sitemap_url
+                else:
+                    print(f"No sitemap found at {sitemap_url}, status code: {req.status_code}")
+            except Exception as e:
+                print(f"Error accessing sitemap: {e}")
+                print(traceback.format_exc())
+                # Continue with just the start URL
+            
+            # MongoDB setup
+            client = MongoClient(mongo_uri)
+            db = client[db_name]
+            self.sitemaps_col = db["sitemaps"]
+            self.pages_col = db["pages"]
+            
+            # Process the sitemap if it was accessible
+            if req.status_code == 200:
+                self.run()
+        except Exception as e:
+            print(f"Error in Sitemap initialization: {e}")
+            print(traceback.format_exc())
+            # Make sure page_urls exists even if there's an error
+            self.page_urls = set([start_url])
 
     def _fetch(self, url):
         """Fetch a URL and return (response, content_type)."""
@@ -135,12 +159,15 @@ class Sitemap:
                 print(f"[PAGE ERROR] {url} → {e}")
 
     def run(self):
-        # Crawl the sitemap(s)
-        
-        print(f"Starting crawl at: {self.start_url}")
-        self.crawl_sitemap(self.start_url)
-        print(f"Discovered {len(self.page_urls)} page URLs.")
-
-        # Fetch & store page-level data
-        self.fetch_and_store_pages()
+        try:
+            # Crawl the sitemap(s)
+            print(f"Starting crawl at: {self.start_url}")
+            self.crawl_sitemap(self.start_url)
+            print(f"Discovered {len(self.page_urls)} page URLs.")
+        except Exception as e:
+            print(f"Error in sitemap run: {e}")
+            print(traceback.format_exc())
+            # Ensure we have at least the starting URL
+            if not self.page_urls:
+                self.page_urls = set([self.start_url])
 

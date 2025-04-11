@@ -1,6 +1,7 @@
 import requests
 from pymongo import MongoClient
 from datetime import datetime, UTC
+import traceback
 
 class Robots:
     def __init__(self, site, db="hackathon", col="robots"):
@@ -9,15 +10,21 @@ class Robots:
         self.db = client[db]
         self.collection = self.db[col]
         self.sitemap_urls = []
-        content, request_info = self.fetch_robots_txt(site)
-
-        if content:
-            rules, sitemaps = self.parse_robots_txt(content)
-            self.sitemap_urls = sitemaps
-            _id = self.save_to_mongodb(site, rules, sitemaps, request_info)
-            self._id = _id
-        else:
-            print("No robots.txt found or unable to fetch.")
+        self._id = None
+        
+        try:
+            content, request_info = self.fetch_robots_txt(site)
+    
+            if content:
+                rules, sitemaps = self.parse_robots_txt(content)
+                self.sitemap_urls = sitemaps
+                self._id = self.save_to_mongodb(site, rules, sitemaps, request_info)
+            else:
+                print("No robots.txt found or unable to fetch.")
+        except Exception as e:
+            print(f"Exception in Robots initialization: {e}")
+            print(traceback.format_exc())
+            # Still set _id to None but don't raise an exception, so processing can continue
             self._id = None
         
     def fetch_robots_txt(self, url):
