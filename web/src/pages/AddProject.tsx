@@ -1,14 +1,16 @@
-import { Button, Label, TextInput, Spinner, Alert } from 'flowbite-react';
+import { Button, Label, TextInput, Spinner, Alert, Badge, Card } from 'flowbite-react';
 import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import Cookies from 'js-cookie';
-import { HiGlobe, HiExclamationCircle } from 'react-icons/hi';
+import { HiGlobe, HiExclamationCircle, HiCheck, HiX, HiSearch, HiPlus, HiTrash } from 'react-icons/hi';
 import ExtractionLogs from '../components/ExtractionLogs';
 import ScrapingOptions, { ScrapingPreferences } from '../components/ScrapingOptions';
 
 export default function AddProject() {
   const [url, setUrl] = useState('');
   const [loading, setLoading] = useState(false);
+  const [verifying, setVerifying] = useState(false);
+  const [verified, setVerified] = useState(false);
   const [error, setError] = useState('');
   const [processingStatus, setProcessingStatus] = useState<string | null>(null);
   const [clientId, setClientId] = useState<string | null>(null);
@@ -16,8 +18,94 @@ export default function AddProject() {
     scrape_mode: 'limited',
     pages_limit: 5
   });
+  const [verificationDetails, setVerificationDetails] = useState<any>(null);
+  
+  // New state for keywords search
+  const [searchKeyword, setSearchKeyword] = useState('');
+  const [searchKeywords, setSearchKeywords] = useState<string[]>([]);
+  const [includeMeta, setIncludeMeta] = useState(true);
+  
   const navigate = useNavigate();
   const token = Cookies.get('token');
+
+  const handleAddKeyword = () => {
+    if (!searchKeyword.trim()) return;
+    
+    // Add keyword if not already in the list
+    if (!searchKeywords.includes(searchKeyword.trim())) {
+      setSearchKeywords([...searchKeywords, searchKeyword.trim()]);
+    }
+    setSearchKeyword('');
+  };
+
+  const handleRemoveKeyword = (keyword: string) => {
+    setSearchKeywords(searchKeywords.filter(k => k !== keyword));
+  };
+
+  const handleVerify = async () => {
+    if (!url.trim()) {
+      setError('Please enter a valid URL');
+      return;
+    }
+
+    setVerifying(true);
+    setError('');
+    setProcessingStatus("Verifying if website allows scraping...");
+    
+    try {
+      if (!token) {
+        throw new Error("Authentication token not found. Please log in again.");
+      }
+
+      // Ensure URL has the proper protocol
+      let formattedUrl = url;
+      if (!formattedUrl.startsWith('http://') && !formattedUrl.startsWith('https://')) {
+        formattedUrl = 'https://' + formattedUrl;
+      }
+
+      console.log('Verifying URL:', formattedUrl);
+      
+      // Call the verification endpoint
+      const response = await fetch('http://localhost:8000/verify_scraping', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`
+        },
+        body: JSON.stringify({ 
+          url: formattedUrl
+        }),
+      });
+      
+      console.log('Verification response status:', response.status);
+      
+      if (!response.ok) {
+        const errorData = await response.json().catch(() => ({ detail: "Failed to parse error" }));
+        throw new Error(errorData.detail || `Failed to verify URL (${response.status})`);
+      }
+      
+      const data = await response.json();
+      console.log('Verification response data:', data);
+      
+      setVerificationDetails(data);
+      setVerified(true);
+      
+      if (data.can_scrape) {
+        setProcessingStatus(`Verification successful: ${data.message}`);
+      } else {
+        setError(`Verification failed: ${data.message}`);
+        setProcessingStatus(null);
+      }
+      
+    } catch (err) {
+      console.error('Error:', err);
+      setError(err instanceof Error ? err.message : 'An error occurred during verification');
+      setProcessingStatus(null);
+      setVerified(false);
+    } finally {
+      setVerifying(false);
+    }
+  };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -27,9 +115,19 @@ export default function AddProject() {
       return;
     }
 
+    // Prevent submission if not verified
+    if (!verified) {
+      setError('Please verify the URL before starting analysis');
+      return;
+    }
+    
+    // Show warning but continue if verification failed
+    if (verificationDetails && !verificationDetails.can_scrape) {
+      setProcessingStatus("Warning: This website may not allow scraping, but proceeding anyway.");
+    }
+
     setLoading(true);
     setError('');
-    setProcessingStatus("Starting analysis...");
     
     try {
       if (!token) {
@@ -43,9 +141,8 @@ export default function AddProject() {
       }
 
       console.log('Submitting URL:', formattedUrl);
-      setProcessingStatus("Submitting URL for analysis...");
       
-      // Include scraping preferences in the request
+      // Include scraping preferences and keywords in the request
       const response = await fetch('http://localhost:8000/add_project_with_scraping', {
         method: 'POST',
         headers: {
@@ -55,7 +152,9 @@ export default function AddProject() {
         body: JSON.stringify({ 
           url: formattedUrl,
           scrape_mode: scrapingPreferences.scrape_mode,
-          pages_limit: scrapingPreferences.pages_limit
+          pages_limit: scrapingPreferences.pages_limit,
+          search_keywords: searchKeywords,
+          include_meta: includeMeta
         }),
       });
       
@@ -68,6 +167,13 @@ export default function AddProject() {
       
       const data = await response.json();
       console.log('Response data:', data);
+
+      if (data.status === "blocked") {
+        setError(data.error || "This website does not allow scraping according to its robots.txt or terms of service.");
+        setLoading(false);
+        setProcessingStatus(null);
+        return;
+      }
       
       // Set client ID for WebSocket connection
       setClientId(data.client_id);
@@ -120,6 +226,13 @@ export default function AddProject() {
     }
   };
 
+  const handleUrlChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    setUrl(e.target.value);
+    // Reset verification when URL changes
+    setVerified(false);
+    setVerificationDetails(null);
+  };
+
   return (
     <div className="min-h-screen flex flex-col bg-gradient-to-r from-blue-50 to-white py-12 px-4 sm:px-6 lg:px-8">
       <div className="max-w-3xl mx-auto w-full">
@@ -150,23 +263,164 @@ export default function AddProject() {
           
           {!clientId && (
             <form onSubmit={handleSubmit} className="space-y-6">
-              <div>
+              <div className="space-y-2">
                 <Label htmlFor="url" className="text-sm font-medium text-gray-700 block mb-2">
                   Website URL
                 </Label>
-                <TextInput
-                  id="url"
-                  type="url"
-                  placeholder="https://example.com"
-                  value={url}
-                  onChange={(e) => setUrl(e.target.value)}
-                  required
-                  disabled={loading}
-                />
+                <div className="flex flex-col md:flex-row gap-2">
+                  <div className="flex-grow">
+                    <TextInput
+                      id="url"
+                      type="url"
+                      placeholder="https://example.com"
+                      value={url}
+                      onChange={handleUrlChange}
+                      required
+                      disabled={loading || verifying}
+                      className="w-full"
+                    />
+                  </div>
+                  <Button
+                    type="button"
+                    color={verified ? (verificationDetails?.can_scrape ? "success" : "failure") : "light"}
+                    onClick={handleVerify}
+                    disabled={verifying || loading || !url.trim()}
+                    className="whitespace-nowrap"
+                  >
+                    {verifying ? (
+                      <>
+                        <Spinner size="sm" className="mr-2" />
+                        Verifying...
+                      </>
+                    ) : verified ? (
+                      <>
+                        {verificationDetails?.can_scrape ? (
+                          <>
+                            <HiCheck className="mr-2 h-5 w-5" />
+                            Verified
+                          </>
+                        ) : (
+                          <>
+                            <HiX className="mr-2 h-5 w-5" />
+                            Not Allowed
+                          </>
+                        )}
+                      </>
+                    ) : (
+                      "Verify URL"
+                    )}
+                  </Button>
+                </div>
                 <p className="mt-1 text-xs text-gray-500">
                   Enter the root domain of the website (we'll find sitemaps and pages automatically)
                 </p>
               </div>
+              
+              {verified && (
+                <div className="bg-gray-50 p-3 rounded-lg">
+                  <h4 className="text-sm font-medium text-gray-700 mb-2">Verification Results</h4>
+                  <div className="text-xs space-y-1">
+                    {verificationDetails?.details?.robots_found ? (
+                      <div className="flex items-center">
+                        <Badge color="success" className="mr-2">robots.txt</Badge>
+                        <span>Found and analyzed</span>
+                      </div>
+                    ) : (
+                      <div className="flex items-center">
+                        <Badge color="warning" className="mr-2">robots.txt</Badge>
+                        <span>Not found</span>
+                      </div>
+                    )}
+                    
+                    {verificationDetails?.details?.terms_url ? (
+                      <div className="flex items-center">
+                        <Badge color="success" className="mr-2">Terms</Badge>
+                        <span>Found at {verificationDetails.details.terms_url}</span>
+                      </div>
+                    ) : (
+                      <div className="flex items-center">
+                        <Badge color="warning" className="mr-2">Terms</Badge>
+                        <span>Not found</span>
+                      </div>
+                    )}
+                    
+                    <div className="flex items-center">
+                      <Badge color={verificationDetails?.can_scrape ? "success" : "failure"} className="mr-2">Result</Badge>
+                      <span>{verificationDetails?.message}</span>
+                    </div>
+                  </div>
+                </div>
+              )}
+              
+              {/* Keywords search section */}
+              <Card className="mb-4">
+                <h3 className="text-lg font-bold mb-4 flex items-center gap-2">
+                  <HiSearch className="text-blue-500" />
+                  Keywords Search Filter
+                </h3>
+                
+                <div className="space-y-4">
+                  <div className="flex flex-col gap-2">
+                    <Label htmlFor="keywords" className="text-sm font-medium text-gray-700">
+                      Add keywords to search for (only pages containing these keywords will be scraped)
+                    </Label>
+                    
+                    <div className="flex gap-2">
+                      <TextInput
+                        id="keywords"
+                        type="text"
+                        placeholder="Enter keyword"
+                        value={searchKeyword}
+                        onChange={(e) => setSearchKeyword(e.target.value)}
+                        className="flex-grow"
+                      />
+                      <Button 
+                        type="button"
+                        onClick={handleAddKeyword}
+                        disabled={!searchKeyword.trim()}
+                        color="light"
+                      >
+                        <HiPlus className="mr-1 h-4 w-4" /> Add
+                      </Button>
+                    </div>
+                    
+                    <div className="flex items-center mt-1">
+                      <input
+                        id="include-meta"
+                        type="checkbox"
+                        checked={includeMeta}
+                        onChange={(e) => setIncludeMeta(e.target.checked)}
+                        className="w-4 h-4 text-blue-600 rounded"
+                      />
+                      <Label htmlFor="include-meta" className="ml-2 text-sm text-gray-600">
+                        Search in meta information (title, description, keywords)
+                      </Label>
+                    </div>
+                  </div>
+                  
+                  {searchKeywords.length > 0 && (
+                    <div>
+                      <Label className="text-sm font-medium text-gray-700 block mb-2">
+                        Current keywords:
+                      </Label>
+                      <div className="flex flex-wrap gap-2">
+                        {searchKeywords.map((keyword, index) => (
+                          <div key={index} className="flex items-center bg-blue-100 text-blue-800 px-2 py-1 rounded-lg">
+                            <span className="mr-1">{keyword}</span>
+                            <button
+                              type="button"
+                              onClick={() => handleRemoveKeyword(keyword)}
+                              className="text-blue-600 hover:text-blue-800"
+                            >
+                              <HiTrash className="h-3 w-3" />
+                            </button>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+                  )}
+                </div>
+              </Card>
               
               {/* Add scraping options component */}
               <ScrapingOptions 
@@ -178,7 +432,7 @@ export default function AddProject() {
                 type="submit"
                 color="blue"
                 className="w-full"
-                disabled={loading}
+                disabled={loading || !url.trim() || !verified}  // Require verification
               >
                 {loading ? (
                   <>
@@ -189,6 +443,22 @@ export default function AddProject() {
                   'Start Analysis'
                 )}
               </Button>
+              
+              {!verified && url.trim() && (
+                <div className="text-center mt-2">
+                  <p className="text-yellow-600 text-sm">
+                    Please verify the URL before starting analysis
+                  </p>
+                </div>
+              )}
+              
+              {verified && !verificationDetails?.can_scrape && (
+                <div className="text-center mt-2">
+                  <p className="text-yellow-600 text-sm">
+                    Warning: This website might not allow scraping. Proceed with caution.
+                  </p>
+                </div>
+              )}
             </form>
           )}
           

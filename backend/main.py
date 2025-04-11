@@ -20,6 +20,9 @@ import traceback
 from utils.websocket_manager import ConnectionManager
 import asyncio
 from typing import Optional
+from modules.groq import ScrapingAssistant
+import aiohttp
+import re
 
 app = FastAPI()
 
@@ -60,6 +63,8 @@ class ProjectURL(BaseModel):
     url: str
     scrape_mode: str = "limited"  # "all" or "limited"
     pages_limit: int = 5  # Default to 5 pages
+    search_keywords: list[str] = []  # List of keywords to search for
+    include_meta: bool = True  # Whether to include meta information in search
 
 class ExtractionInterrupt(BaseModel):
     client_id: str
@@ -333,16 +338,195 @@ async def websocket_endpoint(websocket: WebSocket, client_id: str):
         manager.disconnect(client_id)
         print(f"Client #{client_id} disconnected")
 
+async def fetch_robots_txt(url):
+    """Fetch robots.txt from a given URL"""
+    try:
+        # Ensure URL has protocol
+        if not url.startswith('http'):
+            url = 'https://' + url
+        
+        # Parse the domain
+        from urllib.parse import urlparse
+        parsed_url = urlparse(url)
+        domain = f"{parsed_url.scheme}://{parsed_url.netloc}"
+        
+        # Fetch robots.txt
+        robots_url = f"{domain}/robots.txt"
+        async with aiohttp.ClientSession() as session:
+            async with session.get(robots_url, timeout=5) as response:
+                if response.status == 200:
+                    return await response.text()
+                return None
+    except:
+        return None
+
+async def find_terms_page(url):
+    """Try to find terms & conditions page"""
+    try:
+        # Ensure URL has protocol
+        if not url.startswith('http'):
+            url = 'https://' + url
+            
+        # Parse the domain
+        from urllib.parse import urlparse
+        parsed_url = urlparse(url)
+        domain = f"{parsed_url.scheme}://{parsed_url.netloc}"
+        
+        # Common terms page paths
+        terms_paths = [
+            '/terms', '/terms-of-service', '/terms-and-conditions', 
+            '/tos', '/legal', '/terms-of-use', '/privacy'
+        ]
+        
+        # Try each path
+        async with aiohttp.ClientSession() as session:
+            for path in terms_paths:
+                terms_url = f"{domain}{path}"
+                try:
+                    async with session.head(terms_url, timeout=3) as response:
+                        if response.status == 200:
+                            return terms_url
+                except:
+                    continue
+                    
+        return None
+    except:
+        return None
+
+@app.post("/verify_scraping")
+async def verify_scraping(project: ProjectURL, user: dict = Depends(get_current_user)):
+    """Verify if a website allows scraping without starting the process"""
+    # Ensure URL has the proper protocol
+    url = project.url
+    if not url.startswith('http://') and not url.startswith('https://'):
+        url = 'https://' + url
+    
+    try:
+        # Generate a client ID for tracking
+        client_id = str(ObjectId())
+        
+        # Fetch robots.txt
+        robots_content = await fetch_robots_txt(url)
+        
+        # Try to find terms page
+        terms_url = await find_terms_page(url)
+        
+        # Use the ScrapingAssistant to check if we can scrape
+        scraping_assistant = ScrapingAssistant()
+        can_scrape_result = scraping_assistant.can_scrape(url, robots_content, terms_url)
+        
+        # Return the verification result
+        return {
+            "can_scrape": can_scrape_result == "Yes",
+            "url": url,
+            "message": "Website can be scraped" if can_scrape_result == "Yes" else "Website cannot be scraped based on robots.txt or terms of service",
+            "details": {
+                "robots_found": robots_content is not None,
+                "terms_url": terms_url,
+                "verification_result": can_scrape_result
+            }
+        }
+        
+    except Exception as e:
+        print(f"Error verifying scraping permissions: {e}")
+        print(traceback.format_exc())
+        # Default to warning if there was an error checking
+        return {
+            "can_scrape": True,  # Allow to proceed but with warning
+            "url": url,
+            "message": "Could not verify scraping permissions, proceed with caution",
+            "warning": str(e),
+            "details": {
+                "robots_found": False,
+                "terms_url": None,
+                "error": True
+            }
+        }
+
 @app.post("/add_project_with_scraping")
 async def add_project_with_scraping_route(project: ProjectURL, user: dict = Depends(get_current_user)):
-    # Pass the manager to the function so it can send WebSocket updates
-    return await add_project_with_scraping(
-        user_email=user["email"], 
-        url=project.url, 
-        ws_manager=manager,
-        scrape_mode=project.scrape_mode,
-        pages_limit=project.pages_limit
-    )
+    # Ensure URL has the proper protocol
+    url = project.url
+    if not url.startswith('http://') and not url.startswith('https://'):
+        url = 'https://' + url
+    
+    # Check if we can scrape this site
+    try:
+        # Send initial status update
+        client_id = str(ObjectId())
+        await manager.send_personal_json({
+            "type": "system",
+            "message": "Checking if website allows scraping...",
+            "timestamp": datetime.utcnow().isoformat()
+        }, client_id)
+        
+        # Fetch robots.txt
+        robots_content = await fetch_robots_txt(url)
+        
+        # Try to find terms page
+        terms_url = await find_terms_page(url)
+        
+        # Use the ScrapingAssistant to check if we can scrape
+        scraping_assistant = ScrapingAssistant()
+        can_scrape_result = scraping_assistant.can_scrape(url, robots_content, terms_url)
+        
+        # Log the check
+        await manager.send_personal_json({
+            "type": "system",
+            "message": f"Scraping permission check: {can_scrape_result}",
+            "timestamp": datetime.utcnow().isoformat(),
+            "details": {
+                "robots_found": robots_content is not None,
+                "terms_url": terms_url
+            }
+        }, client_id)
+        
+        # If we can't scrape, return an error
+        if can_scrape_result == "No":
+            await manager.send_personal_json({
+                "type": "error",
+                "message": "This website does not allow scraping based on robots.txt or terms of service.",
+                "timestamp": datetime.utcnow().isoformat()
+            }, client_id)
+            
+            return {
+                "client_id": client_id,
+                "error": "This website does not allow scraping based on robots.txt or terms of service.",
+                "status": "blocked"
+            }
+        
+        # If we can scrape, proceed with the project creation
+        await manager.send_personal_json({
+            "type": "system",
+            "message": "Website allows scraping. Proceeding with analysis...",
+            "timestamp": datetime.utcnow().isoformat()
+        }, client_id)
+        
+        # Pass the manager to the function so it can send WebSocket updates
+        return await add_project_with_scraping(
+            user_email=user["email"], 
+            url=url, 
+            ws_manager=manager,
+            scrape_mode=project.scrape_mode,
+            pages_limit=project.pages_limit,
+            client_id=client_id,
+            search_keywords=project.search_keywords,
+            include_meta=project.include_meta
+        )
+        
+    except Exception as e:
+        print(f"Error checking scraping permissions: {e}")
+        print(traceback.format_exc())
+        # Default to allowing scraping if there was an error checking
+        return await add_project_with_scraping(
+            user_email=user["email"], 
+            url=url, 
+            ws_manager=manager,
+            scrape_mode=project.scrape_mode,
+            pages_limit=project.pages_limit,
+            search_keywords=project.search_keywords,
+            include_meta=project.include_meta
+        )
 
 @app.post("/dynamic_scrape")
 async def dynamic_scrape(config: DynamicScrapeConfig, user: dict = Depends(get_current_user)):
@@ -457,43 +641,4 @@ async def log_page_source(data: PageSource):
         f.write(json.dumps(log_entry) + "\n")
     return {"message": "Page source logged successfully"}
 
-@app.get("/logs")
-async def get_logs():
-    # Ensure the log file exists
-    if not os.path.exists(log_file):
-        with open(log_file, "w") as f:
-            f.write("")  # Create an empty file if it doesn't exist
-    with open(log_file, "r") as f:
-        logs = f.readlines()
-    return {"logs": [json.loads(log) for log in logs if log.strip()]}
 
-@app.get("/live-logs", response_class=HTMLResponse)
-async def live_logs():
-    return """
-    <!DOCTYPE html>
-    <html lang="en">
-    <head>
-        <meta charset="UTF-8">
-        <meta name="viewport" width="device-width, initial-scale=1.0">
-        <title>Live Logs</title>
-    </head>
-    <body>
-        <h1>Live Logs</h1>
-        <ul id="logs"></ul>
-        <script>
-            async function fetchLogs() {
-                const response = await fetch('/logs');
-                const data = await response.json();
-                const logsList = document.getElementById('logs');
-                logsList.innerHTML = ''; // Clear existing logs
-                data.logs.forEach(log => {
-                    const li = document.createElement('li');
-                    li.textContent = `Timestamp: ${log.timestamp}, URL: ${log.url}`;
-                    logsList.appendChild(li);
-                });
-            }
-            setInterval(fetchLogs, 2000); // Fetch logs every 2 seconds
-        </script>
-    </body>
-    </html>
-    """

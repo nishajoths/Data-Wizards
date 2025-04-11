@@ -15,6 +15,11 @@ import uuid
 import time
 import math
 from utils.websocket_manager import ConnectionManager
+import re
+import requests
+from bs4 import BeautifulSoup
+from urllib.parse import urlparse
+from pymongo import MongoClient
 
 client = AsyncIOMotorClient("mongodb://localhost:27017")
 db = client.hackathon
@@ -44,7 +49,10 @@ async def add_project_with_scraping(
     url: str, 
     ws_manager: ConnectionManager = None,
     scrape_mode: str = "limited",
-    pages_limit: int = 5
+    pages_limit: int = 5,
+    client_id: str = None,
+    search_keywords: list = None,
+    include_meta: bool = True
 ):
     """
     Add a new project with threaded extraction, communicating progress via WebSockets.
@@ -74,7 +82,10 @@ async def add_project_with_scraping(
             "start_time": datetime.datetime.utcnow().isoformat(),
             "end_time": None,
             "scrape_mode": scrape_mode,
-            "pages_limit": pages_limit
+            "pages_limit": pages_limit,
+            "search_keywords": search_keywords or [],
+            "include_meta": include_meta,
+            "keyword_matches": {}  # Add a place to store keyword matches
         }
         
         # Create project first to get project ID
@@ -100,8 +111,9 @@ async def add_project_with_scraping(
             {"$push": {"projects": str(project_id)}}
         )
         
-        # Generate a unique client ID for WebSocket communication
-        client_id = f"project_{str(project_id)}"
+        # Create a unique client ID if not provided
+        if not client_id:
+            client_id = f"project_{str(project_id)}"
         
         # Register in active extractions with initial status
         active_extractions[client_id] = {
@@ -131,7 +143,15 @@ async def add_project_with_scraping(
             # Start message consumer in a separate task
             asyncio.create_task(consume_messages(client_id, ws_manager))
             
-            # Start extraction in a separate thread with scrape preferences
+            # Send initial message to client
+            await ws_manager.send_personal_json({
+                "event": "project_created",
+                "project_id": str(project_id),
+                "status": "starting",
+                "message": f"Project created. Starting extraction for {url}"
+            }, client_id)
+            
+            # Start extraction in a separate thread with scrape preferences and search keywords
             thread_pool.submit(
                 run_extraction_thread, 
                 url, 
@@ -139,15 +159,10 @@ async def add_project_with_scraping(
                 client_id, 
                 user_email,
                 scrape_mode,
-                pages_limit
+                pages_limit,
+                search_keywords,
+                include_meta
             )
-            
-            await ws_manager.send_personal_json({
-                "event": "project_created",
-                "project_id": str(project_id),
-                "status": "starting",
-                "message": f"Project created. Starting extraction for {url}"
-            }, client_id)
         
         return {
             "message": "Project added successfully, extraction started in background", 
@@ -160,18 +175,182 @@ async def add_project_with_scraping(
         print(traceback.format_exc())
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
+async def consume_messages(client_id, ws_manager):
+    """
+    Asynchronous task to consume messages from the queue and send them via WebSocket
+    """
+    if client_id not in message_queues:
+        print(f"No message queue found for client {client_id}")
+        return
+    
+    q = message_queues[client_id]
+    try:
+        print(f"Starting message consumer for client {client_id}")
+        while True:
+            try:
+                # Use a non-blocking get with timeout
+                try:
+                    message = q.get(block=False)
+                    await ws_manager.send_personal_json(message, client_id)
+                    q.task_done()
+                except queue.Empty:
+                    # No messages, wait a bit before checking again
+                    await asyncio.sleep(0.1)
+                    
+                    # Check if client is still connected and extraction is done
+                    if (client_id not in active_extractions or 
+                        active_extractions[client_id]["status"] in [STATUS_COMPLETED, STATUS_ERROR, STATUS_INTERRUPTED]):
+                        # If queue is empty and extraction is done, exit the loop
+                        if q.empty():
+                            print(f"Consumer for {client_id} exiting - extraction complete or client disconnected")
+                            if client_id in message_queues:
+                                del message_queues[client_id]
+                            if client_id in active_extractions:
+                                del active_extractions[client_id]
+                            break
+                    continue
+                    
+            except Exception as e:
+                print(f"Error in message consumer for {client_id}: {str(e)}")
+                print(traceback.format_exc())
+                await asyncio.sleep(1)  # Prevent tight loop on error
+    except Exception as e:
+        print(f"Fatal error in consumer for {client_id}: {str(e)}")
+        print(traceback.format_exc())
+    print(f"Message consumer for {client_id} has ended")
+
+def check_page_for_keywords(url, keywords, include_meta=True):
+    """
+    Check if a page contains any of the specified keywords.
+    Returns (contains_keywords, matching_keywords, meta_info, contexts)
+    """
+    try:
+        # Use a proper user agent to avoid being blocked
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/96.0.4664.110 Safari/537.36"
+        }
+        
+        print(f"Checking URL for keywords: {url}")
+        response = requests.get(url, headers=headers, timeout=15)
+        response.raise_for_status()
+        
+        # Parse the HTML
+        soup = BeautifulSoup(response.text, 'html.parser')
+        
+        # Extract visible text content (lowercase for case-insensitive matching)
+        text_content = soup.get_text().lower()
+        
+        # Extract meta information if requested
+        meta_info = {}
+        if include_meta:
+            # Extract title
+            title_tag = soup.find('title')
+            if title_tag:
+                meta_info['title'] = title_tag.get_text()
+            
+            # Extract meta description
+            meta_desc = soup.find('meta', attrs={'name': 'description'})
+            if meta_desc and meta_desc.has_attr('content'):
+                meta_info['description'] = meta_desc['content']
+            
+            # Extract meta keywords
+            meta_keywords = soup.find('meta', attrs={'name': 'keywords'})
+            if meta_keywords and meta_keywords.has_attr('content'):
+                meta_info['keywords'] = meta_keywords['content']
+            
+            # Extract OG (Open Graph) tags
+            og_tags = {}
+            for meta in soup.find_all('meta', attrs={'property': re.compile('^og:')}):
+                if meta.has_attr('content'):
+                    og_tags[meta['property']] = meta['content']
+            if og_tags:
+                meta_info['og'] = og_tags
+        
+        # Check keywords in the text content
+        matching_keywords = []
+        keyword_contexts = {}  # Store the context where each keyword appears
+        
+        for keyword in keywords:
+            # Find all occurrences of the keyword in the text content
+            keyword_lower = keyword.lower()
+            if keyword_lower in text_content:
+                matching_keywords.append(keyword)
+                
+                # Find context (text surrounding the keyword)
+                start_index = text_content.find(keyword_lower)
+                if start_index != -1:
+                    context_start = max(0, start_index - 50)
+                    context_end = min(len(text_content), start_index + len(keyword) + 50)
+                    context = text_content[context_start:context_end]
+                    keyword_contexts[keyword] = f"...{context}..."
+        
+        # If include_meta is True, also check in meta information
+        if include_meta:
+            meta_text = ' '.join([
+                meta_info.get('title', ''),
+                meta_info.get('description', ''),
+                meta_info.get('keywords', ''),
+                ' '.join([v for k, v in meta_info.get('og', {}).items()])
+            ]).lower()
+            
+            for keyword in keywords:
+                keyword_lower = keyword.lower()
+                if keyword_lower in meta_text and keyword not in matching_keywords:
+                    matching_keywords.append(keyword)
+                    
+                    # Add context info from meta tags
+                    if keyword_lower in meta_info.get('title', '').lower():
+                        keyword_contexts[keyword] = f"Found in title: {meta_info['title']}"
+                    elif keyword_lower in meta_info.get('description', '').lower():
+                        keyword_contexts[keyword] = f"Found in meta description: {meta_info['description']}"
+                    elif keyword_lower in meta_info.get('keywords', '').lower():
+                        keyword_contexts[keyword] = f"Found in meta keywords: {meta_info['keywords']}"
+                    else:
+                        keyword_contexts[keyword] = "Found in meta information"
+        
+        print(f"Keywords check for {url}: found {len(matching_keywords)} matches")
+        return len(matching_keywords) > 0, matching_keywords, meta_info, keyword_contexts
+        
+    except Exception as e:
+        print(f"Error checking keywords in {url}: {e}")
+        print(traceback.format_exc())
+        return False, [], {}, {}
+
+def send_log(client_id, log_type, message):
+    """Send a log message to the client via the message queue"""
+    if client_id in message_queues:
+        try:
+            # Format timestamp for consistency
+            timestamp = datetime.datetime.utcnow().isoformat()
+            
+            # Debug logging to server console to track progress
+            print(f"LOG [{client_id}] [{log_type}]: {message}")
+            
+            # Add to message queue for websocket transmission
+            message_queues[client_id].put({
+                "type": log_type,
+                "timestamp": timestamp,
+                "message": message
+            })
+        except Exception as e:
+            print(f"Error sending log: {e}")
+    else:
+        print(f"No message queue for client {client_id}, log message not sent: {message}")
+
 def run_extraction_thread(
     url, 
     project_id, 
     client_id, 
     user_email,
     scrape_mode="limited",
-    pages_limit=5
+    pages_limit=5,
+    search_keywords=None,
+    include_meta=True
 ):
     """
-    Run the extraction process in a separate thread with interrupt capability and detailed logging.
-    This function is executed in a ThreadPoolExecutor.
+    Run the extraction process in a separate thread with keyword filtering.
     """
+    print(f"Starting extraction thread for {url} with client_id {client_id}")
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     
@@ -181,7 +360,7 @@ def run_extraction_thread(
     thread_projects_collection = thread_db.projects
     
     try:
-        # Initialize processing status with scraping preferences
+        # Initialize processing status with scraping preferences and keywords
         processing_status = {
             "robots_status": "not_processed",
             "sitemap_status": "not_processed",
@@ -192,23 +371,17 @@ def run_extraction_thread(
             "start_time": datetime.datetime.utcnow().isoformat(),
             "end_time": None,
             "scrape_mode": scrape_mode,
-            "pages_limit": pages_limit
+            "pages_limit": pages_limit,
+            "search_keywords": search_keywords or [],
+            "include_meta": include_meta
         }
         
-        # Log start of extraction with scraping preferences
+        # Log start of extraction with search preferences
         send_log(client_id, "info", f"Starting extraction process for {url}")
-        send_log(client_id, "info", f"Extraction running in background thread (ID: {client_id})")
-        
-        if scrape_mode == "all":
-            send_log(client_id, "info", f"Scraping mode: ALL pages will be scraped (this could take a while)")
-        else:
-            send_log(client_id, "info", f"Scraping mode: LIMITED to {pages_limit} pages")
-        
-        # Check if extraction should be interrupted before each major step
-        if should_interrupt(client_id):
-            send_log(client_id, "warning", "Extraction interrupted before starting")
-            handle_interruption(client_id, loop, project_id, processing_status)
-            return
+        if search_keywords and len(search_keywords) > 0:
+            send_log(client_id, "info", f"Using keyword filter: {', '.join(search_keywords)}")
+            if include_meta:
+                send_log(client_id, "info", "Including meta information in keyword search")
         
         # Step 1: Process robots.txt
         send_log(client_id, "info", f"Processing robots.txt for {url}")
@@ -218,20 +391,7 @@ def run_extraction_thread(
             robots = Robots(site=url)
             if hasattr(robots, '_id') and robots._id:
                 processing_status["robots_status"] = "success"
-                extraction_stats[client_id]["robots_time"] = time.time() - robots_start
                 send_log(client_id, "success", f"Successfully processed robots.txt")
-                send_log(client_id, "detail", f"Found {len(robots.rules)} rules and {len(robots.sitemap_urls)} sitemap URLs in robots.txt")
-
-                # Update project with robots.txt data
-                update_project_partial_sync(
-                    thread_projects_collection,
-                    project_id,
-                    {
-                        "site_data.robots_id": str(robots._id),
-                        "site_data.robots_rules": robots.rules,
-                        "site_data.sitemap_urls": robots.sitemap_urls
-                    }
-                )
             else:
                 processing_status["robots_status"] = "failed"
                 processing_status["errors"].append("Failed to process robots.txt")
@@ -241,12 +401,6 @@ def run_extraction_thread(
             processing_status["robots_status"] = "error"
             processing_status["errors"].append(error_msg)
             send_log(client_id, "error", error_msg)
-        
-        # Check if extraction should be interrupted after robots.txt
-        if should_interrupt(client_id):
-            send_log(client_id, "warning", "Extraction interrupted after robots.txt processing")
-            handle_interruption(client_id, loop, project_id, processing_status)
-            return
         
         # Step 2: Process sitemap
         sitemap_start = time.time()
@@ -259,17 +413,7 @@ def run_extraction_thread(
                 sitemap_pages = list(sitemap.page_urls)
                 processing_status["sitemap_status"] = "success"
                 processing_status["pages_found"] = len(sitemap_pages)
-                extraction_stats[client_id]["sitemap_time"] = time.time() - sitemap_start
                 send_log(client_id, "success", f"Found {len(sitemap_pages)} pages in sitemap")
-
-                # Update project with sitemap data
-                update_project_partial_sync(
-                    thread_projects_collection,
-                    project_id,
-                    {
-                        "site_data.sitemap_pages": sitemap_pages
-                    }
-                )
             else:
                 processing_status["sitemap_status"] = "no_pages"
                 processing_status["errors"].append("No pages found in sitemap")
@@ -280,240 +424,192 @@ def run_extraction_thread(
             processing_status["errors"].append(error_msg)
             send_log(client_id, "error", error_msg)
         
-        # Update database with sitemap results - using chunking
-        if len(sitemap_pages) > CHUNK_SIZE:
-            send_log(client_id, "info", f"Breaking sitemap data into {math.ceil(len(sitemap_pages)/CHUNK_SIZE)} chunks for processing")
-            # Update with just the count first
-            update_project_partial_sync(
-                thread_projects_collection, 
-                project_id, 
-                {
-                    "processing_status.sitemap_status": processing_status["sitemap_status"],
-                    "processing_status.pages_found": processing_status["pages_found"],
-                    "processing_status.errors": processing_status["errors"]
-                }
-            )
+        # Step 3: Scrape pages - now with keyword filtering
+        scraping_start = time.time()
+        scraped_pages = []
+        filtered_pages = []
+        
+        # Store keyword matches for each page
+        keyword_matches = {}
+        meta_info_extracted = {}
+        keyword_contexts = {}
+        pages_with_keywords = 0
+        pages_checked = 0
+        
+        # First, filter the pages by keywords if keywords are provided
+        if search_keywords and len(search_keywords) > 0:
+            send_log(client_id, "info", f"Filtering pages by keywords: {', '.join(search_keywords)}")
             
-            # Update sitemap pages in chunks
-            for i in range(0, len(sitemap_pages), CHUNK_SIZE):
+            for i, page_url in enumerate(sitemap_pages[:pages_limit]):
+                # Check for interruption
                 if should_interrupt(client_id):
-                    send_log(client_id, "warning", f"Interrupted while updating sitemap chunk {i//CHUNK_SIZE + 1}/{math.ceil(len(sitemap_pages)/CHUNK_SIZE)}")
+                    send_log(client_id, "warning", f"Filtering interrupted after checking {i} pages")
                     handle_interruption(client_id, loop, project_id, processing_status)
                     return
                 
-                chunk = sitemap_pages[i:i+CHUNK_SIZE]
-                send_log(client_id, "detail", f"Updating sitemap chunk {i//CHUNK_SIZE + 1}/{math.ceil(len(sitemap_pages)/CHUNK_SIZE)} ({len(chunk)} pages)")
-                
                 try:
-                    # Use array operations for efficiency
-                    update_project_array_sync(
-                        thread_projects_collection,
-                        project_id,
-                        "site_data.sitemap_pages",
-                        chunk
+                    pages_checked += 1
+                    send_log(client_id, "info", f"Checking page {pages_checked}/{len(sitemap_pages[:pages_limit])} for keywords: {page_url}")
+                    
+                    # Check if page contains keywords
+                    contains_keywords, matches, meta_info, contexts = check_page_for_keywords(
+                        page_url, 
+                        search_keywords, 
+                        include_meta
                     )
-                    extraction_stats[client_id]["chunks_processed"] += 1
-                    send_log(client_id, "success", f"Updated sitemap chunk {i//CHUNK_SIZE + 1}")
+                    
+                    if contains_keywords:
+                        pages_with_keywords += 1
+                        filtered_pages.append(page_url)
+                        keyword_matches[page_url] = matches
+                        keyword_contexts[page_url] = contexts
+                        meta_info_extracted[page_url] = meta_info
+                        
+                        # Create detailed log message about keyword matches
+                        match_details = []
+                        for kw in matches:
+                            context = contexts.get(kw, "No context available")
+                            match_details.append(f"{kw}: {context[:100]}...")
+                            
+                        # Send the log message with keyword matches
+                        send_log(client_id, "success", f"Page {page_url} contains keywords: {', '.join(matches)}")
+                        for detail in match_details:
+                            send_log(client_id, "detail", f"Match context: {detail}")
+                    else:
+                        # Log when no keywords are found as well
+                        send_log(client_id, "warning", f"Page {page_url} does not contain any keywords, skipping")
                 except Exception as e:
-                    error_msg = f"Error updating sitemap chunk: {str(e)}"
-                    processing_status["errors"].append(error_msg)
-                    send_log(client_id, "error", error_msg)
+                    send_log(client_id, "error", f"Error checking keywords in {page_url}: {str(e)}")
+                    print(f"Exception during keyword check: {str(e)}")
+                    print(traceback.format_exc())
+                    # Include the page anyway to avoid missing potentially important content
+                    filtered_pages.append(page_url)
+            
+            # Add a summary of the keyword search
+            if pages_with_keywords > 0:
+                send_log(client_id, "info", f"Found {pages_with_keywords} pages containing keywords out of {pages_checked} checked")
+            else:
+                send_log(client_id, "warning", f"No pages containing the specified keywords were found after checking {pages_checked} pages")
+                # Still log the search attempt
+                processing_status["keyword_search_performed"] = True
+                processing_status["keyword_search_results"] = "no_matches"
+                processing_status["pages_checked"] = pages_checked
+                processing_status["search_keywords"] = search_keywords
+                
+                # Update project with search information
+                update_project_partial_sync(
+                    thread_projects_collection, 
+                    project_id, 
+                    {
+                        "processing_status.keyword_search_performed": True,
+                        "processing_status.keyword_search_results": "no_matches",
+                        "processing_status.pages_checked": pages_checked,
+                        "processing_status.search_keywords": search_keywords
+                    }
+                )
+            
+            # Store keyword match information in processing status for later retrieval
+            processing_status["keyword_matches"] = keyword_matches
+            processing_status["keyword_contexts"] = keyword_contexts
+            processing_status["pages_with_keywords"] = pages_with_keywords
+            processing_status["pages_checked"] = pages_checked
+            
+            # Update the pages to process - if no keywords found, still process some pages
+            if len(filtered_pages) > 0:
+                pages_to_process = filtered_pages
+                send_log(client_id, "info", "Processing only pages containing keywords")
+            else:
+                # If no pages match keywords, still process some pages
+                pages_to_process = sitemap_pages[:min(pages_limit, len(sitemap_pages))]
+                send_log(client_id, "info", "No pages matched keywords, processing a limited set of pages anyway")
         else:
-            # Small enough to update at once
-            update_project_partial_sync(
-                thread_projects_collection, 
-                project_id, 
-                {
-                    "site_data.sitemap_pages": sitemap_pages,
-                    "processing_status.sitemap_status": processing_status["sitemap_status"],
-                    "processing_status.pages_found": processing_status["pages_found"],
-                    "processing_status.errors": processing_status["errors"]
-                }
-            )
+            # No keywords, process all pages up to the limit
+            pages_to_process = sitemap_pages[:pages_limit]
         
-        # Check if extraction should be interrupted after sitemap
-        if should_interrupt(client_id):
-            send_log(client_id, "warning", "Extraction interrupted after sitemap processing")
-            handle_interruption(client_id, loop, project_id, processing_status)
-            return
+        send_log(client_id, "info", f"Starting to scrape {len(pages_to_process)} pages")
         
-        # Step 3: Scrape pages - now with configurable limits
-        scraping_start = time.time()
-        scraped_pages = []
-        
-        # Add network metrics aggregation
-        network_stats = {
-            "total_size_bytes": 0,
-            "total_duration_ms": 0,
-            "pages_with_metrics": 0,
-            "avg_speed_kbps": 0,
-            "fastest_page": {"url": None, "speed_kbps": 0},
-            "slowest_page": {"url": None, "speed_kbps": float('inf')},
-            "total_requests": 0
-        }
-        
-        # Determine number of pages to scrape based on scrape_mode
-        if scrape_mode == "all":
-            page_limit = len(sitemap_pages)
-            send_log(client_id, "info", f"Will scrape ALL {page_limit} pages")
-        else:
-            page_limit = min(pages_limit, len(sitemap_pages))
-            send_log(client_id, "info", f"Found {len(sitemap_pages)} pages, will scrape up to {page_limit} (limited mode)")
-        
-        for i, page_url in enumerate(sitemap_pages[:page_limit]):
-            # Check for interruption before each page
+        # Now process the filtered pages
+        for i, page_url in enumerate(pages_to_process):
+            try:
+                send_log(client_id, "info", f"Scraping page {i+1}/{len(pages_to_process)}: {page_url}")
+                
+                # Add keyword match information if available
+                if page_url in keyword_matches:
+                    send_log(client_id, "detail", f"Keyword matches: {', '.join(keyword_matches[page_url])}")
+                
+                # Add meta information if available
+                if page_url in meta_info_extracted and meta_info_extracted[page_url]:
+                    meta = meta_info_extracted[page_url]
+                    if 'title' in meta:
+                        send_log(client_id, "detail", f"Meta title: {meta.get('title', 'N/A')}")
+                    if 'description' in meta:
+                        send_log(client_id, "detail", f"Meta description: {meta.get('description', 'N/A')}")
+                
+                # Continue with regular scraping
+                scrape_start_time = time.time()
+                scraped_data = scrape_website(page_url)
+                
+                # If we have meta information from the keyword search, add it to scraped data
+                if page_url in meta_info_extracted and meta_info_extracted[page_url]:
+                    scraped_data["meta_info"] = meta_info_extracted[page_url]
+                
+                # Store scraped data
+                store_in_mongodb(scraped_data)
+                scraped_pages.append(page_url)
+                
+                # Log successful scraping
+                send_log(client_id, "success", f"Successfully scraped {page_url}")
+                
+                # Log page info
+                send_log(client_id, "detail", f"Page size: {scraped_data['network_metrics']['content_size_bytes'] / 1024:.1f} KB")
+                if 'duration_ms' in scraped_data['network_metrics'] and scraped_data['network_metrics']['duration_ms'] > 0:
+                    send_log(client_id, "detail", 
+                        f"Page loaded in {scraped_data['network_metrics']['duration_ms']} ms at " +
+                        f"speed: {scraped_data['network_metrics']['speed_kbps']:.1f} KB/s"
+                    )
+                
+                # Log content stats
+                text_count = len(scraped_data['content']['text_content'])
+                image_count = len(scraped_data['content']['images'])
+                send_log(client_id, "detail", f"Extracted {text_count + image_count} elements ({text_count} text, {image_count} images)")
+                
+            except Exception as e:
+                error_msg = f"Error scraping {page_url}: {str(e)}"
+                send_log(client_id, "error", error_msg)
+                print(f"Scraping exception: {error_msg}")
+                print(traceback.format_exc())
+                processing_status["errors"].append(error_msg)
+            
+            # Check for interruption after each page
             if should_interrupt(client_id):
-                send_log(client_id, "warning", f"Extraction interrupted after scraping {i} pages")
+                send_log(client_id, "warning", f"Scraping interrupted after processing {i+1} pages")
                 handle_interruption(client_id, loop, project_id, processing_status)
                 return
-            
-            extraction_stats[client_id]["pages_attempted"] += 1
-            
-            if not page_url.endswith(".xml"):  # Skip XML links
-                try:
-                    send_log(client_id, "info", f"Scraping page {i+1}/{page_limit}: {page_url}")
-                    scrape_start_time = time.time()
-                    scraped_data = scrape_website(page_url)
-                    
-                    if "error" not in scraped_data:
-                        # Count elements for detailed logging
-                        text_count = len(scraped_data.get("content", {}).get("text_content", []))
-                        image_count = len(scraped_data.get("content", {}).get("images", []))
-                        image_text_count = len(scraped_data.get("content", {}).get("image_texts", []))
-                        total_elements = text_count + image_count + image_text_count
-                        
-                        # Estimate size of scraped data
-                        data_size = len(json.dumps(scraped_data))
-                        extraction_stats[client_id]["bytes_processed"] += data_size
-                        extraction_stats[client_id]["total_elements_extracted"] += total_elements
-                        
-                        # Log detailed extraction info
-                        scrape_time = time.time() - scrape_start_time
-                        send_log(client_id, "detail", f"Extracted {total_elements} elements ({text_count} text, {image_count} images, {image_text_count} image texts)")
-                        send_log(client_id, "detail", f"Page size: {data_size/1024:.1f} KB, took {scrape_time:.2f} seconds")
-                        
-                        # Process network metrics
-                        if "network_metrics" in scraped_data:
-                            metrics = scraped_data["network_metrics"]
-                            
-                            # Log network performance
-                            duration_ms = metrics.get("duration_ms", 0)
-                            size_kb = metrics.get("content_size_bytes", 0) / 1024
-                            speed_kbps = metrics.get("speed_kbps", 0)
-                            
-                            send_log(client_id, "network", 
-                                f"Page loaded in {duration_ms}ms | Size: {size_kb:.1f}KB | " +
-                                f"Speed: {speed_kbps:.1f}KB/s")
-                            
-                            # Update aggregated stats
-                            network_stats["total_size_bytes"] += metrics.get("content_size_bytes", 0)
-                            network_stats["total_duration_ms"] += metrics.get("duration_ms", 0)
-                            network_stats["pages_with_metrics"] += 1
-                            network_stats["total_requests"] += 1
-                            
-                            # Track fastest and slowest pages
-                            if speed_kbps > network_stats["fastest_page"]["speed_kbps"]:
-                                network_stats["fastest_page"] = {
-                                    "url": page_url,
-                                    "speed_kbps": speed_kbps
-                                }
-                            
-                            if speed_kbps < network_stats["slowest_page"]["speed_kbps"]:
-                                network_stats["slowest_page"] = {
-                                    "url": page_url,
-                                    "speed_kbps": speed_kbps
-                                }
-                        
-                        store_in_mongodb(scraped_data)
-                        scraped_pages.append(page_url)
-                        extraction_stats[client_id]["pages_successful"] += 1
-                        send_log(client_id, "success", f"Successfully scraped {page_url}")
-                        
-                        # Update progress after each page
-                        processing_status["pages_scraped"] = len(scraped_pages)
-                        
-                        # Update the project with new page only - avoids large updates
-                        update_project_array_sync(
-                            thread_projects_collection, 
-                            project_id, 
-                            "site_data.scraped_pages",
-                            [page_url]
-                        )
-                        
-                        update_project_partial_sync(
-                            thread_projects_collection, 
-                            project_id, 
-                            {
-                                "processing_status.pages_scraped": len(scraped_pages)
-                            }
-                        )
-                        
-                    else:
-                        error_msg = f"Error scraping {page_url}: {scraped_data['error']}"
-                        processing_status["errors"].append(error_msg)
-                        send_log(client_id, "error", error_msg)
-                        
-                        # Try to extract network metrics even on error
-                        if "network_metrics" in scraped_data:
-                            metrics = scraped_data["network_metrics"]
-                            send_log(client_id, "network", 
-                                f"Failed page loaded in {metrics.get('duration_ms', 0)}ms | " +
-                                f"Status: {metrics.get('status_code', 'unknown')}")
-                except Exception as e:
-                    error_msg = f"Error scraping {page_url}: {str(e)}"
-                    processing_status["errors"].append(error_msg)
-                    send_log(client_id, "error", error_msg)
         
-        extraction_stats[client_id]["scraping_time"] = time.time() - scraping_start
+        # Update processing status with final counts
         processing_status["pages_scraped"] = len(scraped_pages)
-        
-        # After all pages are scraped, calculate averages and log summary
-        if network_stats["pages_with_metrics"] > 0:
-            network_stats["avg_speed_kbps"] = (network_stats["total_size_bytes"] / 1024) / (network_stats["total_duration_ms"] / 1000)
-            
-            # Log network performance summary
-            send_log(client_id, "detail", f"Network Performance Summary:")
-            send_log(client_id, "detail", f"Average speed: {network_stats['avg_speed_kbps']:.1f}KB/s")
-            send_log(client_id, "detail", f"Total transferred: {network_stats['total_size_bytes']/1024/1024:.2f}MB")
-            send_log(client_id, "detail", f"Total load time: {network_stats['total_duration_ms']/1000:.2f}s")
-            
-            if network_stats["fastest_page"]["url"]:
-                fast_url = network_stats["fastest_page"]["url"]
-                fast_speed = network_stats["fastest_page"]["speed_kbps"]
-                send_log(client_id, "detail", f"Fastest page: {fast_url} ({fast_speed:.1f}KB/s)")
-            
-            if network_stats["slowest_page"]["url"]:
-                slow_url = network_stats["slowest_page"]["url"]
-                slow_speed = network_stats["slowest_page"]["speed_kbps"]
-                send_log(client_id, "detail", f"Slowest page: {slow_url} ({slow_speed:.1f}KB/s)")
-            
-            # Store network stats in the project
-            processing_status["network_stats"] = network_stats
-        
-        # Final update to project
-        robots_id = str(robots._id) if robots and hasattr(robots, '_id') else None
         processing_status["extraction_status"] = STATUS_COMPLETED
         processing_status["end_time"] = datetime.datetime.utcnow().isoformat()
         
-        # Calculate overall extraction statistics
-        total_time = time.time() - extraction_stats[client_id]["start_time"].timestamp()
-        send_log(client_id, "detail", f"Extraction completed in {total_time:.2f} seconds")
-        send_log(client_id, "detail", f"Robots: {extraction_stats[client_id]['robots_time']:.2f}s, " +
-                               f"Sitemap: {extraction_stats[client_id]['sitemap_time']:.2f}s, " +
-                               f"Scraping: {extraction_stats[client_id]['scraping_time']:.2f}s")
+        # Update project with scraped pages
+        update_project_partial_sync(
+            thread_projects_collection,
+            project_id,
+            {
+                "site_data.scraped_pages": scraped_pages,
+                "processing_status.pages_scraped": len(scraped_pages),
+                "processing_status.extraction_status": STATUS_COMPLETED,
+                "processing_status.end_time": processing_status["end_time"]
+            }
+        )
         
-        if extraction_stats[client_id]["pages_attempted"] > 0:
-            success_rate = (extraction_stats[client_id]["pages_successful"] / extraction_stats[client_id]["pages_attempted"]) * 100
-            send_log(client_id, "detail", f"Scraping success rate: {success_rate:.1f}% ({extraction_stats[client_id]['pages_successful']}/{extraction_stats[client_id]['pages_attempted']})")
-        
-        # Format processed data nicely
-        processed_mb = extraction_stats[client_id]["bytes_processed"] / (1024 * 1024)
-        send_log(client_id, "detail", f"Processed {processed_mb:.2f} MB of data")
-        send_log(client_id, "detail", f"Total elements extracted: {extraction_stats[client_id]['total_elements_extracted']}")
-        
+        # Final update to project with keyword match information
         final_update = {
-            "site_data.robots_id": robots_id,
-            "processing_status": processing_status
+            "processing_status.keyword_matches": keyword_matches,
+            "processing_status.keyword_contexts": keyword_contexts,
+            "processing_status.pages_with_keywords": pages_with_keywords,
+            "processing_status.pages_checked": pages_checked,
+            "processing_status.keyword_search_performed": search_keywords and len(search_keywords) > 0
         }
         
         update_project_partial_sync(
@@ -522,17 +618,22 @@ def run_extraction_thread(
             final_update
         )
         
-        # Notify completion
         send_log(client_id, "info", "Extraction process completed")
-        send_log(client_id, "completion", json.dumps({
-            "project_id": project_id,
-            "processing_status": processing_status
-        }))
         
-        # Update extraction status
-        active_extractions[client_id]["status"] = STATUS_COMPLETED
-        active_extractions[client_id]["last_updated"] = datetime.datetime.utcnow()
-        
+        # Notify client of completion
+        if client_id in message_queues:
+            message_queues[client_id].put({
+                "type": "completion",
+                "timestamp": datetime.datetime.utcnow().isoformat(),
+                "message": json.dumps({
+                    "project_id": project_id,
+                    "processing_status": {
+                        "pages_found": processing_status["pages_found"],
+                        "pages_scraped": processing_status["pages_scraped"]
+                    }
+                })
+            })
+    
     except Exception as e:
         error_msg = f"Unexpected error in extraction thread: {str(e)}"
         print(error_msg)
@@ -554,183 +655,146 @@ def run_extraction_thread(
                 project_id, 
                 {"processing_status": processing_status}
             )
-        except:
-            print("Failed to update project with error status")
+        except Exception as e:
+            print(f"Failed to update project with error status: {str(e)}")
     finally:
-        loop.close()
+        # Make sure to close resources
         thread_client.close()
+        loop.close()
+        print(f"Extraction thread for client {client_id} has completed")
+        
         # Clean up
         if client_id in extraction_stats:
             del extraction_stats[client_id]
 
+def should_interrupt(client_id):
+    """Check if an interruption has been requested for this client"""
+    if client_id not in active_extractions:
+        return False
+    return active_extractions[client_id].get("interrupt_requested", False)
+
 def handle_interruption(client_id, loop, project_id, processing_status):
-    """Handle graceful interruption of extraction process"""
-    processing_status["extraction_status"] = STATUS_INTERRUPTED
-    processing_status["end_time"] = datetime.datetime.utcnow().isoformat()
-    processing_status["errors"].append("Extraction was manually interrupted")
+    """Handle the interruption process"""
+    if client_id not in active_extractions:
+        return
     
-    # Create a thread-local MongoDB client
-    thread_client = AsyncIOMotorClient("mongodb://localhost:27017")
-    thread_db = thread_client.hackathon
-    thread_projects_collection = thread_db.projects
-    
-    # Update project with interrupted status
     try:
-        update_project_partial_sync(
-            thread_projects_collection,
-            project_id, 
-            {"processing_status": processing_status}
-        )
-    except Exception as e:
-        print(f"Error updating project with interrupted status: {e}")
-    finally:
-        thread_client.close()
-    
-    # Update extraction status
-    if client_id in active_extractions:
+        # Set status to interrupted
         active_extractions[client_id]["status"] = STATUS_INTERRUPTED
         active_extractions[client_id]["last_updated"] = datetime.datetime.utcnow()
-    
-    # Send notification
-    send_log(client_id, "warning", "Extraction was interrupted by user request")
-    send_log(client_id, "completion", json.dumps({
-        "project_id": project_id,
-        "processing_status": processing_status
-    }))
-
-def should_interrupt(client_id):
-    """Check if extraction should be interrupted"""
-    if client_id in active_extractions:
-        return active_extractions[client_id].get("interrupt_requested", False)
-    return False
+        
+        # Update processing status
+        processing_status["extraction_status"] = STATUS_INTERRUPTED
+        processing_status["end_time"] = datetime.datetime.utcnow().isoformat()
+        
+        # Get MongoDB client
+        thread_client = AsyncIOMotorClient("mongodb://localhost:27017")
+        thread_db = thread_client.hackathon
+        thread_projects_collection = thread_db.projects
+        
+        # Update the project with interrupted status
+        update_project_partial_sync(
+            thread_projects_collection,
+            project_id,
+            {"processing_status": processing_status}
+        )
+        
+        # Send log message
+        send_log(client_id, "warning", "Extraction interrupted by user request")
+        
+        # Clean up
+        thread_client.close()
+        
+        # Send completion message
+        if client_id in message_queues:
+            message_queues[client_id].put({
+                "type": "completion",
+                "timestamp": datetime.datetime.utcnow().isoformat(),
+                "message": json.dumps({
+                    "project_id": project_id,
+                    "processing_status": {
+                        "pages_found": processing_status.get("pages_found", 0),
+                        "pages_scraped": processing_status.get("pages_scraped", 0),
+                        "extraction_status": STATUS_INTERRUPTED
+                    }
+                })
+            })
+    except Exception as e:
+        print(f"Error handling interruption: {str(e)}")
+        print(traceback.format_exc())
 
 def interrupt_extraction(client_id):
-    """Set flag to interrupt extraction process"""
-    if client_id in active_extractions:
-        active_extractions[client_id]["interrupt_requested"] = True
-        active_extractions[client_id]["last_updated"] = datetime.datetime.utcnow()
-        return True
-    return False
+    """Send an interrupt signal to an extraction process"""
+    if client_id not in active_extractions:
+        return False
+    
+    active_extractions[client_id]["interrupt_requested"] = True
+    active_extractions[client_id]["last_updated"] = datetime.datetime.utcnow()
+    print(f"Interrupt requested for client {client_id}")
+    return True
 
 def get_extraction_status(client_id):
-    """Get current extraction status"""
-    if client_id in active_extractions:
-        return active_extractions[client_id]
-    return None
+    """Get the current status of an extraction process"""
+    if client_id not in active_extractions:
+        return None
+    
+    status = active_extractions[client_id].copy()
+    
+    # Add additional stats if available
+    if client_id in extraction_stats:
+        status["stats"] = extraction_stats[client_id]
+    
+    return status
 
-def send_log(client_id, log_type, message):
-    """Send a log message to the WebSocket queue"""
-    if client_id in message_queues:
-        log_entry = {
-            "type": log_type,
-            "timestamp": datetime.datetime.utcnow().isoformat(),
-            "message": message
-        }
-        message_queues[client_id].put(log_entry)
-
-async def update_project_partial(project_id, update_data, loop=None):
-    """Update specific fields in the project document"""
+def update_project_partial_sync(collection, project_id, update_data):
+    """Update a project with partial data in a synchronous way"""
     try:
-        # Convert string ID to ObjectId if needed
-        if isinstance(project_id, str):
-            project_id = ObjectId(project_id)
-            
-        # Create the update with $set
-        update = {"$set": {}}
+        # Create a sync client to avoid asyncio issues in threads
+        client = MongoClient("mongodb://localhost:27017")
+        db = client.hackathon
+        
+        # Get the collection
+        coll = db[collection.name]
+        
+        # Build the update document
+        update_doc = {}
         for key, value in update_data.items():
-            update["$set"][key] = value
-            
-        # Simply await the operation directly
-        return await projects_collection.update_one({"_id": project_id}, update)
+            if "." in key:
+                # Handle nested fields with dot notation
+                update_doc[key] = value
+            else:
+                # Handle top-level fields
+                update_doc[key] = value
+        
+        # Update the document
+        coll.update_one({"_id": ObjectId(project_id)}, {"$set": update_doc})
+        
+        # Close the client
+        client.close()
+        
     except Exception as e:
         print(f"Error updating project: {str(e)}")
         print(traceback.format_exc())
-        raise e
 
-async def update_project_array(project_id, array_field, items, loop=None):
-    """Update an array field in the project document using $push with $each"""
+def update_project_array_sync(collection, project_id, array_field, items):
+    """Update a project array field by adding items in a synchronous way"""
     try:
-        # Convert string ID to ObjectId if needed
-        if isinstance(project_id, str):
-            project_id = ObjectId(project_id)
-            
-        # Create the update operation
-        update_operation = {"$push": {array_field: {"$each": items}}}
+        # Create a sync client to avoid asyncio issues in threads
+        client = MongoClient("mongodb://localhost:27017")
+        db = client.hackathon
         
-        # Simply await the operation directly
-        return await projects_collection.update_one({"_id": project_id}, update_operation)
+        # Get the collection
+        coll = db[collection.name]
+        
+        # Update the document by pushing to the array
+        coll.update_one(
+            {"_id": ObjectId(project_id)}, 
+            {"$push": {array_field: {"$each": items}}}
+        )
+        
+        # Close the client
+        client.close()
+        
     except Exception as e:
         print(f"Error updating project array: {str(e)}")
         print(traceback.format_exc())
-        raise e
-
-def update_project_partial_sync(collection, project_id, update_data):
-    """Synchronous version for use in thread context"""
-    try:
-        # Convert string ID to ObjectId if needed
-        if isinstance(project_id, str):
-            project_id = ObjectId(project_id)
-            
-        # Create the update with $set
-        update = {"$set": {}}
-        for key, value in update_data.items():
-            update["$set"][key] = value
-            
-        # Use the synchronous operations (blocking)
-        return collection.update_one({"_id": project_id}, update)
-    except Exception as e:
-        print(f"Error updating project (sync): {str(e)}")
-        print(traceback.format_exc())
-        raise e
-
-def update_project_array_sync(collection, project_id, array_field, items):
-    """Synchronous version for use in thread context"""
-    try:
-        # Convert string ID to ObjectId if needed
-        if isinstance(project_id, str):
-            project_id = ObjectId(project_id)
-            
-        # Create the update operation
-        update_operation = {"$push": {array_field: {"$each": items}}}
-        
-        # Use the synchronous operations (blocking)
-        return collection.update_one({"_id": project_id}, update_operation)
-    except Exception as e:
-        print(f"Error updating project array (sync): {str(e)}")
-        print(traceback.format_exc())
-        raise e
-
-async def consume_messages(client_id, ws_manager):
-    """
-    Asynchronous task to consume messages from the queue and send them via WebSocket
-    """
-    if client_id not in message_queues:
-        return
-    
-    q = message_queues[client_id]
-    while True:
-        try:
-            # Use a non-blocking get with timeout
-            try:
-                message = q.get(block=False)
-                await ws_manager.send_personal_json(message, client_id)
-                q.task_done()
-            except queue.Empty:
-                # No messages, wait a bit before checking again
-                await asyncio.sleep(0.1)
-                
-                # Check if client is still connected and extraction is done
-                if (client_id not in active_extractions or 
-                    active_extractions[client_id]["status"] in [STATUS_COMPLETED, STATUS_ERROR, STATUS_INTERRUPTED]):
-                    # If queue is empty and extraction is done, exit the loop
-                    if q.empty():
-                        if client_id in message_queues:
-                            del message_queues[client_id]
-                        if client_id in active_extractions:
-                            del active_extractions[client_id]
-                        break
-                continue
-                
-        except Exception as e:
-            print(f"Error in message consumer for {client_id}: {str(e)}")
-            await asyncio.sleep(1)  # Prevent tight loop on error

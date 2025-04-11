@@ -56,8 +56,24 @@ export default function ProjectSuccess() {
     );
   }
 
-  const { project_id, processing_status } = projectData;
-  const { robots_status, sitemap_status, pages_found, pages_scraped, errors, scrape_mode, pages_limit } = processing_status;
+  const { project_id, processing_status = {} } = projectData;
+  const { 
+    robots_status = 'not_processed', 
+    sitemap_status = 'not_processed', 
+    pages_found = 0, 
+    pages_scraped = 0, 
+    errors = [], 
+    scrape_mode = 'limited', 
+    pages_limit = 5 
+  }:any = processing_status ?? {
+    robots_status: 'not_processed',
+    sitemap_status: 'not_processed',
+    pages_found: 0,
+    pages_scraped: 0,
+    errors: [],
+    scrape_mode: 'limited',
+    pages_limit: 5,
+  };
 
   const getStatusIcon = (status: string) => {
     if (status === 'success') return <HiCheckCircle className="w-6 h-6 text-green-500" />;
@@ -149,7 +165,7 @@ export default function ProjectSuccess() {
             <Alert color="warning" className="mb-6">
               <h4 className="font-medium">Some issues were encountered</h4>
               <ul className="list-disc pl-5 mt-2 text-sm">
-                {errors.map((error, index) => (
+                {errors.map((error:any, index:any) => (
                   <li key={index}>{error}</li>
                 ))}
               </ul>

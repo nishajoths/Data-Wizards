@@ -5,8 +5,12 @@ import pytesseract
 from io import BytesIO
 from pymongo import MongoClient
 import time
+import json
+import re
+from datetime import datetime
 
 def scrape_website(url):
+    print(f"Scraping website: {url}")
     # Record start time for network metrics
     start_time = time.time()
     network_metrics = {
@@ -22,7 +26,11 @@ def scrape_website(url):
     
     # Fetch the webpage content
     try:
-        response = requests.get(url)
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/96.0.4664.110 Safari/537.36"
+        }
+        response = requests.get(url, headers=headers, timeout=15)
+        
         # Record network metrics
         network_metrics["end_time"] = time.time()
         network_metrics["duration_ms"] = int((network_metrics["end_time"] - network_metrics["start_time"]) * 1000)
@@ -37,108 +45,175 @@ def scrape_website(url):
         for header in ["content-type", "server", "cache-control"]:
             if header in response.headers:
                 network_metrics["headers"][header] = response.headers[header]
+                
+        print(f"Request completed: status={response.status_code}, size={len(response.content)} bytes")
     except Exception as e:
+        error_msg = f"Failed to fetch the webpage: {str(e)}"
+        print(f"Error: {error_msg}")
         return {
-            "error": f"Failed to fetch the webpage: {str(e)}",
-            "network_metrics": network_metrics
+            "error": error_msg,
+            "network_metrics": network_metrics,
+            "content": {"text_content": [], "images": [], "image_texts": [], "orders": []}
         }
     
     if response.status_code != 200:
+        error_msg = f"Failed to fetch the webpage. Status code: {response.status_code}"
+        print(f"Error: {error_msg}")
         return {
-            "error": f"Failed to fetch the webpage. Status code: {response.status_code}",
-            "network_metrics": network_metrics
+            "error": error_msg,
+            "network_metrics": network_metrics,
+            "content": {"text_content": [], "images": [], "image_texts": [], "orders": []}
         }
     
-    soup = BeautifulSoup(response.content, 'html.parser')
-    
-    # Extract textual content with metadata
-    text_content = []
-    for p in soup.find_all('p'):
-        text_content.append({
-            "type": "paragraph",
-            "content": p.get_text(strip=True)
-        })
-    
-    # Extract image URLs with metadata
-    images = []
-    for img_tag in soup.find_all('img'):
-        img_url = img_tag.get('src')
-        if img_url:
-            if not img_url.startswith(('http://', 'https://')):
-                img_url = requests.compat.urljoin(url, img_url)
-            images.append({
-                "type": "image",
-                "url": img_url,
-                "alt_text": img_tag.get('alt', '').strip()
-            })
-    
-    # Extract text from images with metadata
-    image_texts = []
-    for img in images:
-        try:
-            img_response = requests.get(img["url"])
-            if img_response.status_code == 200:
-                img_obj = Image.open(BytesIO(img_response.content))
-                text_from_image = pytesseract.image_to_string(img_obj).strip()
-                image_texts.append({
-                    "type": "image_text",
-                    "image_url": img["url"],
-                    "extracted_text": text_from_image
+    try:
+        print("Parsing HTML content...")
+        soup = BeautifulSoup(response.content, 'html.parser')
+        
+        # Extract meta information
+        meta_info = extract_meta_info(soup, url)
+        
+        # Extract textual content with metadata
+        print("Extracting text content...")
+        text_content = []
+        for p in soup.find_all(['p', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'li']):
+            text = p.get_text(strip=True)
+            if text:  # Only add non-empty text
+                text_content.append({
+                    "type": "paragraph",
+                    "content": text
                 })
-        except Exception as e:
-            image_texts.append({
-                "type": "image_text",
-                "image_url": img["url"],
-                "error": f"Error processing image: {e}"
-            })
-    
-    # Extract orders with metadata (example assumes orders are in a table)
-    orders = []
-    order_table = soup.find('table', {'id': 'orders'})  # Replace 'id' with the actual identifier for the orders table
-    if order_table:
-        for row in order_table.find_all('tr')[1:]:  # Skip the header row
-            cells = row.find_all('td')
-            if len(cells) > 1:
-                orders.append({
-                    "order_id": cells[0].get_text(strip=True),
-                    "product_name": cells[1].get_text(strip=True),
-                    "quantity": cells[2].get_text(strip=True) if len(cells) > 2 else None,
-                    "price": cells[3].get_text(strip=True) if len(cells) > 3 else None
+        
+        # Extract image URLs with metadata
+        print("Extracting images...")
+        images = []
+        for img_tag in soup.find_all('img'):
+            img_url = img_tag.get('src')
+            if img_url:
+                if not img_url.startswith(('http://', 'https://')):
+                    img_url = requests.compat.urljoin(url, img_url)
+                images.append({
+                    "type": "image",
+                    "url": img_url,
+                    "alt_text": img_tag.get('alt', '').strip()
                 })
-    
-    # Structure the extracted data
-    structured_data = {
+        
+        # Extract text from images with metadata - skip this for performance
+        image_texts = []
+        # We'll skip OCR for performance reasons
+        
+        # Extract orders with metadata (example assumes orders are in a table)
+        orders = []
+        # Skip order extraction for now
+
+        # Structure the extracted data
+        structured_data = {
+            "url": url,
+            "meta_info": meta_info,
+            "content": {
+                "text_content": text_content,
+                "images": images,
+                "image_texts": image_texts,
+                "orders": orders
+            },
+            "network_metrics": network_metrics
+        }
+        
+        print(f"Scraping completed: {len(text_content)} text elements, {len(images)} images")
+        return structured_data
+    except Exception as e:
+        error_msg = f"Error parsing website content: {str(e)}"
+        print(f"Error: {error_msg}")
+        import traceback
+        print(traceback.format_exc())
+        
+        # Return at least partial data if we have it
+        return {
+            "url": url,
+            "error": error_msg,
+            "network_metrics": network_metrics,
+            "content": {"text_content": [], "images": [], "image_texts": [], "orders": []}
+        }
+
+def extract_meta_info(soup, url):
+    """Extract comprehensive metadata from the page"""
+    meta_info = {
         "url": url,
-        "content": {
-            "text_content": text_content,
-            "images": images,
-            "image_texts": image_texts,
-            "orders": orders  # Include orders in the structured data
-        },
-        "network_metrics": network_metrics  # Include network metrics in the result
+        "extracted_at": datetime.now().isoformat(),
+        "basic": {},
+        "open_graph": {},
+        "twitter": {},
+        "structured_data": []
     }
     
-    return structured_data
+    # Extract title and basic meta tags
+    title_tag = soup.find('title')
+    if title_tag:
+        meta_info["basic"]["title"] = title_tag.get_text()
+    
+    # Extract common meta tags
+    for meta in soup.find_all('meta'):
+        if meta.has_attr('name') and meta.has_attr('content'):
+            meta_info["basic"][meta['name']] = meta['content']
+            
+        # Also check for http-equiv meta tags
+        if meta.has_attr('http-equiv') and meta.has_attr('content'):
+            meta_info["basic"][f"http-equiv:{meta['http-equiv']}"] = meta['content']
+    
+    # Extract Open Graph tags
+    for meta in soup.find_all('meta', attrs={'property': re.compile('^og:')}):
+        if meta.has_attr('content'):
+            property_name = meta['property'].replace('og:', '')
+            meta_info["open_graph"][property_name] = meta['content']
+    
+    # Extract Twitter Card tags
+    for meta in soup.find_all('meta', attrs={'name': re.compile('^twitter:')}):
+        if meta.has_attr('content'):
+            property_name = meta['name'].replace('twitter:', '')
+            meta_info["twitter"][property_name] = meta['content']
+    
+    # Extract canonical URL
+    canonical_link = soup.find('link', rel='canonical')
+    if canonical_link and canonical_link.has_attr('href'):
+        meta_info["basic"]["canonical"] = canonical_link['href']
+    
+    # Extract favicon
+    favicon = soup.find('link', rel=lambda r: r and ('icon' in r or r == 'shortcut icon'))
+    if favicon and favicon.has_attr('href'):
+        meta_info["basic"]["favicon"] = requests.compat.urljoin(url, favicon['href'])
+    
+    # Extract JSON-LD structured data
+    for script in soup.find_all('script', attrs={'type': 'application/ld+json'}):
+        try:
+            if script.string:
+                data = json.loads(script.string)
+                meta_info["structured_data"].append(data)
+        except:
+            pass
+    
+    # Clean up empty sections
+    for section in ["basic", "open_graph", "twitter"]:
+        if not meta_info[section]:
+            meta_info.pop(section)
+    
+    if not meta_info["structured_data"]:
+        meta_info.pop("structured_data")
+    
+    return meta_info
 
 def store_in_mongodb(data):
     try:
+        print(f"Storing data in MongoDB for URL: {data.get('url', 'unknown')}")
         # Connect to MongoDB
         client = MongoClient("mongodb://localhost:27017/")
         db = client["hackathon"]
         collection = db["sites"]
         
         # Insert the data into the collection
-        collection.insert_one(data)
-        print("Data successfully stored in MongoDB.")
+        result = collection.insert_one(data)
+        print(f"Data successfully stored in MongoDB with ID: {result.inserted_id}")
+        return result.inserted_id
     except Exception as e:
         print(f"Error storing data in MongoDB: {e}")
-
-# # Example usage
-# if __name__ == "__main__":
-#     url = "https://internshala.com/internship/detail/sales-and-marketing-associate-internship-in-multiple-locations-at-aimaxon-marketing-solutions-private-limited1739926646"  # Replace with the target URL
-#     result = scrape_website(url)
-#     print(result)
-    
-#     # Store the result in MongoDB
-#     if "error" not in result:
-#         store_in_mongodb(result)
+        import traceback
+        print(traceback.format_exc())
+        return None

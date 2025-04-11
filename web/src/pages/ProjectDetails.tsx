@@ -1,15 +1,16 @@
 import { useEffect, useState, useRef } from "react";
 import { useParams, Link, useNavigate } from "react-router-dom";
-import { Card, Spinner, Button, Alert, Tabs, TabItem } from "flowbite-react";
+import { Card, Spinner, Button, Alert, Tabs, TabItem, Label, Badge } from "flowbite-react";
 import Cookies from 'js-cookie';
 import { 
   HiArrowLeft, HiLink, HiGlobe, HiExclamationCircle, 
   HiCode, HiDocumentText, HiTable, HiOutlineCog,
   HiChartPie, HiTrash, HiLightningBolt, HiPhotograph, 
-  HiExternalLink
+  HiExternalLink, HiInformationCircle
 } from 'react-icons/hi';
 import DeleteConfirmationModal from "../components/DeleteConfirmationModal";
 import NetworkAnalytics from '../components/NetworkAnalytics';
+import MetadataViewer from '../components/MetadataViewer';
 
 // Interface for robots.txt rules
 interface RobotsRule {
@@ -44,10 +45,21 @@ interface PageContent {
   error?: string;
 }
 
+// Interface for page metadata
+interface PageMetadata {
+  url: string;
+  basic?: Record<string, string>;
+  open_graph?: Record<string, string>;
+  twitter?: Record<string, string>;
+  structured_data?: any[];
+  extracted_at?: string;
+}
+
 // Interface for structured content from scraped pages
 interface ScrapedContent {
   _id: string;
   url: string;
+  meta_info?: PageMetadata;
   content: {
     text_content: PageContent[];
     images: PageContent[];
@@ -115,6 +127,7 @@ export default function ProjectDetails() {
   const [deleteModalOpen, setDeleteModalOpen] = useState(false);
   const [deleteLoading, setDeleteLoading] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
+  const [selectedPageMetadata, setSelectedPageMetadata] = useState<PageMetadata | null>(null);
 
   useEffect(() => {
     const fetchProject = async () => {
@@ -251,6 +264,15 @@ export default function ProjectDetails() {
       setDeleteModalOpen(false);
     } finally {
       setDeleteLoading(false);
+    }
+  };
+
+  const handleViewMetadata = (pageUrl: string) => {
+    const page = project?.related_data.scraped_content.find(p => p.url === pageUrl);
+    if (page && page.meta_info) {
+      setSelectedPageMetadata(page.meta_info);
+    } else {
+      setSelectedPageMetadata(null);
     }
   };
 
@@ -461,7 +483,7 @@ export default function ProjectDetails() {
         aria-label="Project tabs" 
         className="underline"
         onActiveTabChange={(tabIndex) => {
-          const tabs = ['overview', 'robots', 'pages', 'content', 'images', 'data-flow', 'network'];
+          const tabs = ['overview', 'robots', 'pages', 'content', 'images', 'data-flow', 'network', 'metadata'];
           setActiveTab(tabs[tabIndex]);
         }}
       >
@@ -880,6 +902,104 @@ export default function ProjectDetails() {
             <NetworkAnalytics 
               networkStats={processing_status.network_stats} 
             />
+          )}
+        </TabItem>
+
+        <TabItem 
+          title="Metadata" 
+          icon={HiInformationCircle}
+          active={activeTab === 'metadata'}
+        >
+          {activeTab === 'metadata' && (
+            <div className="space-y-6">
+              <Card>
+                <h3 className="text-xl font-bold mb-4">Page Metadata</h3>
+                <p className="mb-4">View metadata extracted from each page including title, description, Open Graph tags, and more.</p>
+                
+                <div className="mb-4">
+                  <Label htmlFor="page-selector">Select a page</Label>
+                  <select
+                    id="page-selector"
+                    className="bg-gray-50 border border-gray-300 text-gray-900 text-sm rounded-lg focus:ring-blue-500 focus:border-blue-500 block w-full p-2.5"
+                    onChange={(e) => handleViewMetadata(e.target.value)}
+                    value={selectedPageMetadata?.url || ''}
+                  >
+                    <option value="">Select a page...</option>
+                    {scraped_content.map((page) => (
+                      <option key={page._id} value={page.url}>
+                        {page.url}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                
+                {selectedPageMetadata ? (
+                  <MetadataViewer metadata={selectedPageMetadata} url={selectedPageMetadata.url} />
+                ) : (
+                  <div className="text-center p-6 bg-gray-50 rounded-lg">
+                    <p className="text-gray-500">Select a page to view its metadata</p>
+                  </div>
+                )}
+              </Card>
+              
+              <Card>
+                <h3 className="text-xl font-bold mb-4">Metadata Overview</h3>
+                <div className="space-y-4">
+                  <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    <div className="bg-blue-50 p-4 rounded-lg">
+                      <h4 className="font-medium text-blue-700 mb-2">Pages with Metadata</h4>
+                      <p className="text-2xl font-bold">
+                        {scraped_content.filter(page => page.meta_info).length} / {scraped_content.length}
+                      </p>
+                    </div>
+                    
+                    <div className="bg-green-50 p-4 rounded-lg">
+                      <h4 className="font-medium text-green-700 mb-2">Open Graph Tags</h4>
+                      <p className="text-2xl font-bold">
+                        {scraped_content.filter(page => page.meta_info?.open_graph && Object.keys(page.meta_info.open_graph).length > 0).length}
+                      </p>
+                    </div>
+                  </div>
+                  
+                  <table className="w-full text-sm text-left text-gray-500">
+                    <thead className="text-xs text-gray-700 uppercase bg-gray-50">
+                      <tr>
+                        <th scope="col" className="py-2 px-4">URL</th>
+                        <th scope="col" className="py-2 px-4">Title</th>
+                        <th scope="col" className="py-2 px-4">Has Meta</th>
+                        <th scope="col" className="py-2 px-4">Actions</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {scraped_content.slice(0, 10).map((page) => (
+                        <tr key={page._id} className="bg-white border-b">
+                          <td className="py-2 px-4 truncate max-w-xs">{page.url}</td>
+                          <td className="py-2 px-4 truncate max-w-xs">{page.meta_info?.basic?.title || "No title"}</td>
+                          <td className="py-2 px-4">
+                            {page.meta_info ? (
+                              <Badge color="success">Yes</Badge>
+                            ) : (
+                              <Badge color="failure">No</Badge>
+                            )}
+                          </td>
+                          <td className="py-2 px-4">
+                            <Button size="xs" color="light" onClick={() => handleViewMetadata(page.url)}>
+                              View
+                            </Button>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                  
+                  {scraped_content.length > 10 && (
+                    <div className="text-center text-sm text-gray-500">
+                      Showing 10 of {scraped_content.length} pages
+                    </div>
+                  )}
+                </div>
+              </Card>
+            </div>
           )}
         </TabItem>
       </Tabs>

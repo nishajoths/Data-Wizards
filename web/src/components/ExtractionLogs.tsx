@@ -1,6 +1,6 @@
 import { useEffect, useState, useRef } from 'react';
 import { Alert, Badge, Card, Spinner, Button, Tabs, TabItem } from 'flowbite-react';
-import { HiInformationCircle, HiExclamationCircle, HiCheckCircle, HiStop, HiCog, HiLightningBolt } from 'react-icons/hi';
+import { HiInformationCircle, HiExclamationCircle, HiCheckCircle, HiStop, HiCog, HiLightningBolt, HiSearch, HiX } from 'react-icons/hi';
 import Cookies from 'js-cookie';
 
 interface LogEntry {
@@ -77,6 +77,38 @@ export default function ExtractionLogs({ clientId, onComplete }: ExtractionLogsP
   const token = Cookies.get('token');
   const timerRef = useRef<NodeJS.Timeout | null>(null);
 
+  // Add state for keyword search results
+  const [keywordMatches, setKeywordMatches] = useState<Record<string, string[]>>({});
+  const [keywordContexts, setKeywordContexts] = useState<Record<string, Record<string, string>>>({});
+
+  // Add state for sitemap information
+  const [sitemapDetails, setSitemapDetails] = useState<{
+    found: boolean;
+    pagesCount: number;
+    samplePages: string[];
+    errors: string[];
+  }>({
+    found: false,
+    pagesCount: 0,
+    samplePages: [],
+    errors: []
+  });
+
+  // Add state for keyword search status
+  const [keywordSearchStatus, setKeywordSearchStatus] = useState<{
+    performed: boolean;
+    termsSearched: string[];
+    pagesChecked: number;
+    pagesMatched: number;
+    noMatchesFound: boolean;
+  }>({
+    performed: false,
+    termsSearched: [],
+    pagesChecked: 0,
+    pagesMatched: 0,
+    noMatchesFound: false
+  });
+
   useEffect(() => {
     // Connect to WebSocket
     const wsUrl = `ws://localhost:8000/ws/${clientId}`;
@@ -137,6 +169,44 @@ export default function ExtractionLogs({ clientId, onComplete }: ExtractionLogsP
         }
         
         setLogs((prevLogs) => [...prevLogs, data]);
+        updateStats(data.message);
+
+        // Extract keyword search status
+        if (data.message.includes("Using keyword filter:")) {
+          const match = data.message.match(/Using keyword filter: (.+)/);
+          if (match) {
+            const keywords = match[1].split(', ');
+            setKeywordSearchStatus(prev => ({
+              ...prev,
+              performed: true,
+              termsSearched: keywords
+            }));
+          }
+        }
+        
+        // Track pages checked for keywords
+        if (data.message.includes("Checking page") && data.message.includes("for keywords:")) {
+          setKeywordSearchStatus(prev => ({
+            ...prev,
+            pagesChecked: prev.pagesChecked + 1
+          }));
+        }
+        
+        // Track when pages contain keywords
+        if (data.message.includes("contains keywords:")) {
+          setKeywordSearchStatus(prev => ({
+            ...prev,
+            pagesMatched: prev.pagesMatched + 1
+          }));
+        }
+        
+        // Track when no matches are found
+        if (data.message.includes("No pages containing the specified keywords were found")) {
+          setKeywordSearchStatus(prev => ({
+            ...prev,
+            noMatchesFound: true
+          }));
+        }
       } catch (err) {
         console.error('Error parsing WebSocket message:', err);
       }
@@ -195,7 +265,9 @@ export default function ExtractionLogs({ clientId, onComplete }: ExtractionLogsP
     if (message.includes("Found") && message.includes("pages in sitemap")) {
       const match = message.match(/Found (\d+) pages in sitemap/);
       if (match && match[1]) {
-        setStats(prev => ({...prev, totalPages: parseInt(match[1])}));
+        const pagesCount = parseInt(match[1]);
+        setStats(prev => ({...prev, totalPages: pagesCount}));
+        setSitemapDetails(prev => ({...prev, found: true, pagesCount}));
       }
     }
     
@@ -221,6 +293,72 @@ export default function ExtractionLogs({ clientId, onComplete }: ExtractionLogsP
         const newProgress = prev.totalPages ? Math.round((newScraped / prev.totalPages) * 100) : 0;
         return {...prev, scrapedPages: newScraped, progress: newProgress};
       });
+    }
+
+    // Extract keyword match information
+    if (message.includes("contains keywords:")) {
+      try {
+        const urlMatch = message.match(/Page (.+?) contains keywords: (.+)/);
+        if (urlMatch && urlMatch.length >= 3) {
+          const url = urlMatch[1];
+          const keywords = urlMatch[2].split(', ');
+          
+          setKeywordMatches(prev => ({
+            ...prev,
+            [url]: keywords
+          }));
+        }
+      } catch (error) {
+        console.error("Error parsing keyword match:", error);
+      }
+    }
+    
+    // Extract keyword context information
+    if (message.includes("Match context:")) {
+      try {
+        const contextMatch = message.match(/Match context: (.+?): (.+)/);
+        if (contextMatch && contextMatch.length >= 3) {
+          const keyword = contextMatch[1];
+          const context = contextMatch[2];
+          
+          // Store context by keyword
+          setKeywordContexts(prev => {
+            const urlKeys = Object.keys(keywordMatches);
+            const latestUrl = urlKeys.length > 0 ? urlKeys[urlKeys.length - 1] : "unknown";
+            
+            const urlContexts = prev[latestUrl] || {};
+            return {
+              ...prev,
+              [latestUrl]: {
+                ...urlContexts,
+                [keyword]: context
+              }
+            };
+          });
+        }
+      } catch (error) {
+        console.error("Error parsing keyword context:", error);
+      }
+    }
+
+    // Capture sample pages
+    if (message.includes("Page") && message.includes(":") && !message.includes("Error") && !message.includes("warning")) {
+      const match = message.match(/Page \d+: (.+)/);
+      if (match && match[1]) {
+        const pageUrl = match[1].trim();
+        setSitemapDetails(prev => ({
+          ...prev, 
+          samplePages: [...prev.samplePages, pageUrl].slice(0, 10) // Keep only 10 sample pages
+        }));
+      }
+    }
+    
+    // Capture sitemap errors
+    if ((message.includes("Error in sitemap") || message.includes("No pages found in sitemap")) && !message.includes("chunk")) {
+      setSitemapDetails(prev => ({
+        ...prev,
+        errors: [...prev.errors, message]
+      }));
     }
   };
 
@@ -272,6 +410,8 @@ export default function ExtractionLogs({ clientId, onComplete }: ExtractionLogsP
         return <HiCog className="h-5 w-5 text-blue-400" />;
       case 'network':
         return <HiLightningBolt className="h-5 w-5 text-purple-500" />;
+      case 'keyword':
+        return <HiSearch className="h-5 w-5 text-purple-600" />;
       default:
         return <HiInformationCircle className="h-5 w-5 text-blue-500" />;
     }
@@ -311,6 +451,156 @@ export default function ExtractionLogs({ clientId, onComplete }: ExtractionLogsP
   const standardLogs = logs.filter(log => !['detail', 'network'].includes(log.type));
   const detailLogs = logs.filter(log => log.type === 'detail');
   const networkLogs = logs.filter(log => log.type === 'network');
+
+  // Add a new component to display keyword search results
+  const renderKeywordSearchResults = () => {
+    const urls = Object.keys(keywordMatches);
+    if (urls.length === 0) return null;
+    
+    return (
+      <div className="mb-4">
+        <h4 className="font-medium text-gray-700 mb-2">Keyword Search Results</h4>
+        <Card className="overflow-hidden">
+          <div className="max-h-64 overflow-y-auto">
+            {urls.map((url, idx) => (
+              <div key={idx} className="border-b border-gray-100 p-3 last:border-b-0">
+                <div className="flex items-center mb-2">
+                  <HiSearch className="mr-2 text-purple-600" />
+                  <span className="font-medium text-gray-800 truncate max-w-xs" title={url}>{url}</span>
+                </div>
+                <div className="pl-6 space-y-2">
+                  <div className="flex flex-wrap gap-2">
+                    {keywordMatches[url].map((keyword, kidx) => (
+                      <span key={kidx} className="px-2 py-1 bg-purple-100 text-purple-800 text-xs rounded-full">
+                        {keyword}
+                      </span>
+                    ))}
+                  </div>
+                  {keywordContexts[url] && Object.keys(keywordContexts[url]).length > 0 && (
+                    <div className="mt-1 text-xs text-gray-600 space-y-1">
+                      {Object.entries(keywordContexts[url]).map(([keyword, context], cidx) => (
+                        <div key={cidx}>
+                          <span className="font-medium">{keyword}:</span> {context}
+                        </div>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              </div>
+            ))}
+          </div>
+        </Card>
+      </div>
+    );
+  };
+
+  // Add a new component to display sitemap information
+  const renderSitemapInfo = () => {
+    if (!sitemapDetails.found && sitemapDetails.errors.length === 0) return null;
+    
+    return (
+      <Card className="mb-4">
+        <h4 className="font-medium text-gray-700 mb-2">Sitemap Information</h4>
+        {sitemapDetails.found ? (
+          <>
+            <div className="text-green-500 font-medium flex items-center gap-1">
+              <HiCheckCircle /> Sitemap successfully processed
+            </div>
+            <p className="text-sm mt-1">Found {sitemapDetails.pagesCount} pages</p>
+            
+            {sitemapDetails.samplePages.length > 0 && (
+              <div className="mt-2">
+                <p className="text-xs text-gray-700 font-medium">Sample pages:</p>
+                <div className="max-h-40 overflow-y-auto mt-1">
+                  <ul className="text-xs text-gray-600">
+                    {sitemapDetails.samplePages.map((url, idx) => (
+                      <li key={idx} className="truncate mb-1">{url}</li>
+                    ))}
+                  </ul>
+                </div>
+              </div>
+            )}
+          </>
+        ) : (
+          <>
+            <div className="text-red-500 font-medium flex items-center gap-1">
+              <HiExclamationCircle /> Sitemap processing issues
+            </div>
+            
+            {sitemapDetails.errors.length > 0 && (
+              <div className="mt-2">
+                <p className="text-xs text-gray-700 font-medium">Errors:</p>
+                <div className="max-h-32 overflow-y-auto mt-1">
+                  <ul className="text-xs text-red-600">
+                    {sitemapDetails.errors.map((error, idx) => (
+                      <li key={idx} className="mb-1">{error}</li>
+                    ))}
+                  </ul>
+                </div>
+              </div>
+            )}
+          </>
+        )}
+      </Card>
+    );
+  };
+
+  // Add a component to render keyword search summary
+  const renderKeywordSearchSummary = () => {
+    if (!keywordSearchStatus.performed) return null;
+    
+    return (
+      <Card className="mb-4">
+        <h4 className="font-medium text-gray-700 mb-2 flex items-center gap-2">
+          <HiSearch className="text-purple-600" /> Keyword Search Summary
+        </h4>
+        
+        <div className="space-y-3">
+          <div>
+            <p className="text-sm font-medium">Search terms:</p>
+            <div className="flex flex-wrap gap-1 mt-1">
+              {keywordSearchStatus.termsSearched.map((term, idx) => (
+                <span key={idx} className="px-2 py-1 bg-purple-100 text-purple-800 text-xs rounded-full">
+                  {term}
+                </span>
+              ))}
+            </div>
+          </div>
+          
+          <div className="grid grid-cols-2 gap-2">
+            <div className="bg-gray-50 p-2 rounded">
+              <p className="text-xs text-gray-500">Pages Checked</p>
+              <p className="font-medium">{keywordSearchStatus.pagesChecked}</p>
+            </div>
+            <div className="bg-gray-50 p-2 rounded">
+              <p className="text-xs text-gray-500">Pages with Matches</p>
+              <p className="font-medium">{keywordSearchStatus.pagesMatched}</p>
+            </div>
+          </div>
+          
+          {keywordSearchStatus.noMatchesFound && (
+            <div className="bg-yellow-50 border border-yellow-200 rounded p-3 text-yellow-700 text-sm">
+              <div className="flex items-center mb-1">
+                <HiX className="mr-1 text-yellow-500" />
+                <span className="font-medium">No matches found</span>
+              </div>
+              <p>None of the pages contained the specified keywords. Some pages will still be processed.</p>
+            </div>
+          )}
+          
+          {keywordSearchStatus.pagesMatched > 0 && (
+            <div className="bg-green-50 border border-green-200 rounded p-3 text-green-700 text-sm">
+              <div className="flex items-center mb-1">
+                <HiCheckCircle className="mr-1 text-green-500" />
+                <span className="font-medium">Matches found</span>
+              </div>
+              <p>Found {keywordSearchStatus.pagesMatched} pages containing the specified keywords.</p>
+            </div>
+          )}
+        </div>
+      </Card>
+    );
+  };
 
   return (
     <div className="mt-4">
@@ -391,6 +681,15 @@ export default function ExtractionLogs({ clientId, onComplete }: ExtractionLogsP
         </div>
       </Card>
 
+      {/* Keyword Search Summary Panel */}
+      {keywordSearchStatus.performed && renderKeywordSearchSummary()}
+
+      {/* Sitemap Information Panel */}
+      {(sitemapDetails.found || sitemapDetails.errors.length > 0) && renderSitemapInfo()}
+
+      {/* Keyword Search Results Panel */}
+      {Object.keys(keywordMatches).length > 0 && renderKeywordSearchResults()}
+
       {error && (
         <Alert color="failure" className="mb-4">
           {error}
@@ -398,7 +697,7 @@ export default function ExtractionLogs({ clientId, onComplete }: ExtractionLogsP
       )}
 
       {/* Tabbed Log View */}
-      <Tabs aria-label="Log tabs" style={{ textDecoration: 'underline' }} onActiveTabChange={(tab) => setActiveTab(['main', 'network', 'technical'][tab])}>
+      <Tabs aria-label="Log tabs" style={{ textDecoration: 'underline' }} onActiveTabChange={(tab) => setActiveTab(['main', 'network', 'technical', 'keywords'][tab])}>
         <TabItem title="Main Logs" active={activeTab === 'main'}>
           <Card className="overflow-hidden">
             <div className="h-64 overflow-y-auto p-2 bg-gray-50 rounded border">
@@ -506,6 +805,43 @@ export default function ExtractionLogs({ clientId, onComplete }: ExtractionLogsP
                     <div key={index} className="p-1.5 text-xs border-b border-gray-100">
                       <span className="text-gray-500 mr-2">{new Date(log.timestamp).toLocaleTimeString()}</span>
                       <span className="text-blue-600">{log.message}</span>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </Card>
+        </TabItem>
+
+        <TabItem title="Keywords" icon={HiSearch} active={activeTab === 'keywords'}>
+          <Card className="overflow-hidden">
+            <div className="h-64 overflow-y-auto p-2 bg-gray-50 rounded border">
+              {Object.keys(keywordMatches).length === 0 ? (
+                <div className="flex items-center justify-center h-full text-gray-500">
+                  <p>No keyword matches found yet</p>
+                </div>
+              ) : (
+                <div className="space-y-2">
+                  {Object.entries(keywordMatches).map(([url, keywords], idx) => (
+                    <div key={idx} className="p-3 bg-white rounded border">
+                      <p className="font-medium text-gray-700 truncate" title={url}>{url}</p>
+                      <div className="flex flex-wrap gap-1 mt-1">
+                        {keywords.map((keyword, kidx) => (
+                          <span key={kidx} className="px-2 py-1 bg-purple-100 text-purple-800 text-xs rounded-full">
+                            {keyword}
+                          </span>
+                        ))}
+                      </div>
+                      {keywordContexts[url] && (
+                        <div className="mt-2 text-xs text-gray-600 border-t border-gray-100 pt-2">
+                          <p className="font-medium">Context:</p>
+                          {Object.entries(keywordContexts[url]).map(([kw, context], cidx) => (
+                            <div key={cidx} className="mt-1">
+                              <span className="font-medium">{kw}:</span> {context}
+                            </div>
+                          ))}
+                        </div>
+                      )}
                     </div>
                   ))}
                 </div>
