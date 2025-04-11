@@ -175,6 +175,11 @@ def run_extraction_thread(
     loop = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     
+    # Create a thread-local MongoDB client
+    thread_client = AsyncIOMotorClient("mongodb://localhost:27017")
+    thread_db = thread_client.hackathon
+    thread_projects_collection = thread_db.projects
+    
     try:
         # Initialize processing status with scraping preferences
         processing_status = {
@@ -218,15 +223,15 @@ def run_extraction_thread(
                 send_log(client_id, "detail", f"Found {len(robots.rules)} rules and {len(robots.sitemap_urls)} sitemap URLs in robots.txt")
 
                 # Update project with robots.txt data
-                loop.run_until_complete(update_project_partial(
+                update_project_partial_sync(
+                    thread_projects_collection,
                     project_id,
                     {
                         "site_data.robots_id": str(robots._id),
                         "site_data.robots_rules": robots.rules,
                         "site_data.sitemap_urls": robots.sitemap_urls
-                    },
-                    loop=loop
-                ))
+                    }
+                )
             else:
                 processing_status["robots_status"] = "failed"
                 processing_status["errors"].append("Failed to process robots.txt")
@@ -258,13 +263,13 @@ def run_extraction_thread(
                 send_log(client_id, "success", f"Found {len(sitemap_pages)} pages in sitemap")
 
                 # Update project with sitemap data
-                loop.run_until_complete(update_project_partial(
+                update_project_partial_sync(
+                    thread_projects_collection,
                     project_id,
                     {
                         "site_data.sitemap_pages": sitemap_pages
-                    },
-                    loop=loop
-                ))
+                    }
+                )
             else:
                 processing_status["sitemap_status"] = "no_pages"
                 processing_status["errors"].append("No pages found in sitemap")
@@ -279,15 +284,15 @@ def run_extraction_thread(
         if len(sitemap_pages) > CHUNK_SIZE:
             send_log(client_id, "info", f"Breaking sitemap data into {math.ceil(len(sitemap_pages)/CHUNK_SIZE)} chunks for processing")
             # Update with just the count first
-            loop.run_until_complete(update_project_partial(
+            update_project_partial_sync(
+                thread_projects_collection, 
                 project_id, 
                 {
                     "processing_status.sitemap_status": processing_status["sitemap_status"],
                     "processing_status.pages_found": processing_status["pages_found"],
                     "processing_status.errors": processing_status["errors"]
-                },
-                loop=loop  # Pass the loop
-            ))
+                }
+            )
             
             # Update sitemap pages in chunks
             for i in range(0, len(sitemap_pages), CHUNK_SIZE):
@@ -301,12 +306,12 @@ def run_extraction_thread(
                 
                 try:
                     # Use array operations for efficiency
-                    loop.run_until_complete(update_project_array(
+                    update_project_array_sync(
+                        thread_projects_collection,
                         project_id,
                         "site_data.sitemap_pages",
-                        chunk,
-                        loop=loop  # Pass the loop
-                    ))
+                        chunk
+                    )
                     extraction_stats[client_id]["chunks_processed"] += 1
                     send_log(client_id, "success", f"Updated sitemap chunk {i//CHUNK_SIZE + 1}")
                 except Exception as e:
@@ -315,16 +320,16 @@ def run_extraction_thread(
                     send_log(client_id, "error", error_msg)
         else:
             # Small enough to update at once
-            loop.run_until_complete(update_project_partial(
+            update_project_partial_sync(
+                thread_projects_collection, 
                 project_id, 
                 {
                     "site_data.sitemap_pages": sitemap_pages,
                     "processing_status.sitemap_status": processing_status["sitemap_status"],
                     "processing_status.pages_found": processing_status["pages_found"],
                     "processing_status.errors": processing_status["errors"]
-                },
-                loop=loop  # Pass the loop
-            ))
+                }
+            )
         
         # Check if extraction should be interrupted after sitemap
         if should_interrupt(client_id):
@@ -428,20 +433,20 @@ def run_extraction_thread(
                         processing_status["pages_scraped"] = len(scraped_pages)
                         
                         # Update the project with new page only - avoids large updates
-                        loop.run_until_complete(update_project_array(
+                        update_project_array_sync(
+                            thread_projects_collection, 
                             project_id, 
                             "site_data.scraped_pages",
-                            [page_url],
-                            loop=loop  # Pass the loop
-                        ))
+                            [page_url]
+                        )
                         
-                        loop.run_until_complete(update_project_partial(
+                        update_project_partial_sync(
+                            thread_projects_collection, 
                             project_id, 
                             {
                                 "processing_status.pages_scraped": len(scraped_pages)
-                            },
-                            loop=loop  # Pass the loop
-                        ))
+                            }
+                        )
                         
                     else:
                         error_msg = f"Error scraping {page_url}: {scraped_data['error']}"
@@ -511,11 +516,11 @@ def run_extraction_thread(
             "processing_status": processing_status
         }
         
-        loop.run_until_complete(update_project_partial(
+        update_project_partial_sync(
+            thread_projects_collection, 
             project_id, 
-            final_update,
-            loop=loop  # Pass the loop
-        ))
+            final_update
+        )
         
         # Notify completion
         send_log(client_id, "info", "Extraction process completed")
@@ -544,15 +549,16 @@ def run_extraction_thread(
             processing_status["extraction_status"] = STATUS_ERROR
             processing_status["end_time"] = datetime.datetime.utcnow().isoformat()
             processing_status["errors"].append(error_msg)
-            loop.run_until_complete(update_project_partial(
+            update_project_partial_sync(
+                thread_projects_collection,
                 project_id, 
-                {"processing_status": processing_status},
-                loop=loop  # Pass the loop
-            ))
+                {"processing_status": processing_status}
+            )
         except:
             print("Failed to update project with error status")
     finally:
         loop.close()
+        thread_client.close()
         # Clean up
         if client_id in extraction_stats:
             del extraction_stats[client_id]
@@ -563,15 +569,22 @@ def handle_interruption(client_id, loop, project_id, processing_status):
     processing_status["end_time"] = datetime.datetime.utcnow().isoformat()
     processing_status["errors"].append("Extraction was manually interrupted")
     
+    # Create a thread-local MongoDB client
+    thread_client = AsyncIOMotorClient("mongodb://localhost:27017")
+    thread_db = thread_client.hackathon
+    thread_projects_collection = thread_db.projects
+    
     # Update project with interrupted status
     try:
-        loop.run_until_complete(update_project_partial(
+        update_project_partial_sync(
+            thread_projects_collection,
             project_id, 
-            {"processing_status": processing_status},
-            loop=loop  # Pass the loop
-        ))
+            {"processing_status": processing_status}
+        )
     except Exception as e:
         print(f"Error updating project with interrupted status: {e}")
+    finally:
+        thread_client.close()
     
     # Update extraction status
     if client_id in active_extractions:
@@ -627,13 +640,8 @@ async def update_project_partial(project_id, update_data, loop=None):
         for key, value in update_data.items():
             update["$set"][key] = value
             
-        # Use the specific loop if provided, otherwise use the current one
-        if loop:
-            future = projects_collection.update_one({"_id": project_id}, update)
-            return await asyncio.wrap_future(asyncio.ensure_future(future, loop=loop))
-        else:
-            # Normal async operation
-            return await projects_collection.update_one({"_id": project_id}, update)
+        # Simply await the operation directly
+        return await projects_collection.update_one({"_id": project_id}, update)
     except Exception as e:
         print(f"Error updating project: {str(e)}")
         print(traceback.format_exc())
@@ -649,15 +657,46 @@ async def update_project_array(project_id, array_field, items, loop=None):
         # Create the update operation
         update_operation = {"$push": {array_field: {"$each": items}}}
         
-        # Use the specific loop if provided
-        if loop:
-            future = projects_collection.update_one({"_id": project_id}, update_operation)
-            return await asyncio.wrap_future(asyncio.ensure_future(future, loop=loop))
-        else:
-            # Normal async operation
-            return await projects_collection.update_one({"_id": project_id}, update_operation)
+        # Simply await the operation directly
+        return await projects_collection.update_one({"_id": project_id}, update_operation)
     except Exception as e:
         print(f"Error updating project array: {str(e)}")
+        print(traceback.format_exc())
+        raise e
+
+def update_project_partial_sync(collection, project_id, update_data):
+    """Synchronous version for use in thread context"""
+    try:
+        # Convert string ID to ObjectId if needed
+        if isinstance(project_id, str):
+            project_id = ObjectId(project_id)
+            
+        # Create the update with $set
+        update = {"$set": {}}
+        for key, value in update_data.items():
+            update["$set"][key] = value
+            
+        # Use the synchronous operations (blocking)
+        return collection.update_one({"_id": project_id}, update)
+    except Exception as e:
+        print(f"Error updating project (sync): {str(e)}")
+        print(traceback.format_exc())
+        raise e
+
+def update_project_array_sync(collection, project_id, array_field, items):
+    """Synchronous version for use in thread context"""
+    try:
+        # Convert string ID to ObjectId if needed
+        if isinstance(project_id, str):
+            project_id = ObjectId(project_id)
+            
+        # Create the update operation
+        update_operation = {"$push": {array_field: {"$each": items}}}
+        
+        # Use the synchronous operations (blocking)
+        return collection.update_one({"_id": project_id}, update_operation)
+    except Exception as e:
+        print(f"Error updating project array (sync): {str(e)}")
         print(traceback.format_exc())
         raise e
 

@@ -5,7 +5,8 @@ import Cookies from 'js-cookie';
 import { 
   HiArrowLeft, HiLink, HiGlobe, HiExclamationCircle, 
   HiCode, HiDocumentText, HiTable, HiOutlineCog,
-  HiChartPie, HiTrash, HiLightningBolt
+  HiChartPie, HiTrash, HiLightningBolt, HiPhotograph, 
+  HiExternalLink
 } from 'react-icons/hi';
 import DeleteConfirmationModal from "../components/DeleteConfirmationModal";
 import NetworkAnalytics from '../components/NetworkAnalytics';
@@ -460,7 +461,7 @@ export default function ProjectDetails() {
         aria-label="Project tabs" 
         className="underline"
         onActiveTabChange={(tabIndex) => {
-          const tabs = ['overview', 'robots', 'pages', 'content', 'data-flow', 'network'];
+          const tabs = ['overview', 'robots', 'pages', 'content', 'images', 'data-flow', 'network'];
           setActiveTab(tabs[tabIndex]);
         }}
       >
@@ -553,16 +554,72 @@ export default function ProjectDetails() {
           {activeTab === 'pages' && (
             <div>
               <h3 className="text-lg font-semibold mb-4">Discovered Pages</h3>
+              
+              <div className="mb-4 flex justify-between items-center">
+                <p className="text-sm text-gray-600">
+                  {site_data.sitemap_pages?.length || 0} pages were found in the sitemap
+                </p>
+                
+                {site_data.sitemap_pages?.length > 0 && (
+                  <div className="flex gap-2">
+                    <span className="inline-flex items-center px-2 py-1 text-xs rounded-md bg-green-100 text-green-800">
+                      <span className="w-2 h-2 mr-1 rounded-full bg-green-500"></span>
+                      {scraped_content.length} scraped
+                    </span>
+                    <span className="inline-flex items-center px-2 py-1 text-xs rounded-md bg-gray-100 text-gray-800">
+                      <span className="w-2 h-2 mr-1 rounded-full bg-gray-500"></span>
+                      {(site_data.sitemap_pages?.length || 0) - scraped_content.length} not scraped
+                    </span>
+                  </div>
+                )}
+              </div>
+              
               {site_data.sitemap_pages?.length > 0 ? (
-                <ul className="list-disc pl-5 text-gray-600">
-                  {site_data.sitemap_pages.map((page, index) => (
-                    <li key={index}>
-                      <a href={page} target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline">
-                        {page}
-                      </a>
-                    </li>
-                  ))}
-                </ul>
+                <div className="overflow-x-auto">
+                  <table className="w-full text-sm text-left text-gray-500">
+                    <thead className="text-xs text-gray-700 uppercase bg-gray-50">
+                      <tr>
+                        <th scope="col" className="px-4 py-3">URL</th>
+                        <th scope="col" className="px-4 py-3 text-center">Status</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {site_data.sitemap_pages.map((page, index) => {
+                        // Check if this page was successfully scraped
+                        const isScraped = scraped_content.some(content => content.url === page);
+                        
+                        return (
+                          <tr key={index} className="bg-white border-b hover:bg-gray-50">
+                            <td className="px-4 py-3">
+                              <a 
+                                href={page} 
+                                target="_blank" 
+                                rel="noopener noreferrer" 
+                                className="text-blue-600 hover:underline flex items-center"
+                              >
+                                <span className="truncate max-w-md inline-block">{page}</span>
+                                <HiExternalLink className="ml-1 flex-shrink-0" />
+                              </a>
+                            </td>
+                            <td className="px-4 py-3 text-center">
+                              {isScraped ? (
+                                <span className="inline-flex items-center px-2 py-1 text-xs font-medium rounded-full bg-green-100 text-green-800">
+                                  <span className="w-2 h-2 mr-1 rounded-full bg-green-500"></span>
+                                  Scraped
+                                </span>
+                              ) : (
+                                <span className="inline-flex items-center px-2 py-1 text-xs font-medium rounded-full bg-gray-100 text-gray-800">
+                                  <span className="w-2 h-2 mr-1 rounded-full bg-gray-500"></span>
+                                  Not Scraped
+                                </span>
+                              )}
+                            </td>
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
               ) : (
                 <p className="text-gray-500 italic">No pages found in sitemap</p>
               )}
@@ -579,13 +636,93 @@ export default function ProjectDetails() {
             <div>
               <h3 className="text-lg font-semibold mb-4">Scraped Content</h3>
               {scraped_content.length > 0 ? (
-                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-6">
+                <div className="space-y-8">
                   {scraped_content.map((content, index) => (
-                    <Card key={index}>
-                      <h4 className="font-bold text-gray-700 truncate">{content.url}</h4>
-                      <p className="text-sm text-gray-500">Text: {content.content.text_content?.length || 0} items</p>
-                      <p className="text-sm text-gray-500">Images: {content.content.images?.length || 0} items</p>
-                      <p className="text-sm text-gray-500">Image Texts: {content.content.image_texts?.length || 0} items</p>
+                    <Card key={index} className="overflow-hidden">
+                      <div className="border-b pb-2 mb-4">
+                        <h4 className="font-bold text-lg text-blue-700 truncate">
+                          <a href={content.url} target="_blank" rel="noopener noreferrer" className="hover:underline flex items-center">
+                            {content.url} <HiLink className="ml-1" size={16} />
+                          </a>
+                        </h4>
+                        <div className="flex gap-2 text-xs text-gray-500 mt-1">
+                          <span>{content.content.text_content?.length || 0} text items</span>
+                          <span>•</span>
+                          <span>{content.content.images?.length || 0} images</span>
+                          <span>•</span>
+                          <span>{content.content.image_texts?.length || 0} image texts</span>
+                        </div>
+                      </div>
+                      
+                      {/* Text Content Section */}
+                      {content.content.text_content?.length > 0 && (
+                        <div className="mb-4">
+                          <h5 className="font-semibold text-gray-700 mb-2">Text Content</h5>
+                          <div className="max-h-60 overflow-y-auto p-3 bg-gray-50 rounded">
+                            {content.content.text_content.map((text, textIndex) => (
+                              <div key={textIndex} className="mb-2 last:mb-0">
+                                <p className="text-sm text-gray-700">{text.content}</p>
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                      
+                      {/* Images Section */}
+                      {content.content.images?.length > 0 && (
+                        <div className="mb-4">
+                          <h5 className="font-semibold text-gray-700 mb-2">Images</h5>
+                          <div className="grid grid-cols-2 md:grid-cols-5 gap-4">
+                            {content.content.images.map((image, imgIndex) => (
+                              <div key={imgIndex} className="relative group">
+                                <img 
+                                  src={image.url} 
+                                  alt={image.alt_text || "Scraped image"}
+                                  className="w-full h-40 object-contain rounded border border-gray-200"
+                                  onError={(e) => {
+                                    const target = e.target as HTMLImageElement;
+                                    target.src = "https://via.placeholder.com/150?text=Image+Error";
+                                  }}
+                                />
+                                {image.alt_text && (
+                                  <div className="absolute bottom-0 left-0 right-0 bg-black bg-opacity-60 text-white text-xs p-1 opacity-0 group-hover:opacity-100 transition-opacity">
+                                    {image.alt_text}
+                                  </div>
+                                )}
+                              </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                      
+                      {/* Extracted Text from Images Section */}
+                      {content.content.image_texts?.length > 0 && (
+                        <div>
+                          <h5 className="font-semibold text-gray-700 mb-2">Text Extracted from Images</h5>
+                          <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                            {content.content.image_texts
+                              .filter(img => img.extracted_text && img.extracted_text.trim() !== "")
+                              .map((imgText, textIndex) => (
+                                <div key={textIndex} className="flex bg-gray-50 rounded p-2">
+                                  <img 
+                                    src={imgText.image_url} 
+                                    alt="Source image"
+                                    className="w-16 h-16 object-cover rounded mr-2"
+                                    onError={(e) => {
+                                      const target = e.target as HTMLImageElement;
+                                      target.src = "https://via.placeholder.com/60?text=Img";
+                                    }}
+                                  />
+                                  <div className="flex-1">
+                                    <p className="text-xs text-gray-700 overflow-auto max-h-16">
+                                      {imgText.extracted_text}
+                                    </p>
+                                  </div>
+                                </div>
+                            ))}
+                          </div>
+                        </div>
+                      )}
                     </Card>
                   ))}
                 </div>
@@ -596,6 +733,54 @@ export default function ProjectDetails() {
           )}
         </TabItem>
 
+        {/* <TabItem 
+          title="Images" 
+          icon={HiPhotograph}
+          active={activeTab === 'images'}
+        >
+          {activeTab === 'images' && (
+            <div>
+              <h3 className="text-lg font-semibold mb-4">All Images</h3>
+              {scraped_content.length > 0 && scraped_content.some(content => content.content.images?.length > 0) ? (
+                <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-4">
+                  {scraped_content.flatMap((content) => 
+                    content.content.images?.map((image, imgIndex) => (
+                      <div key={`${content._id}-${imgIndex}`} className="group">
+                        <div className="relative aspect-square bg-gray-100 rounded overflow-hidden">
+                          <img 
+                            src={image.url} 
+                            alt={image.alt_text || "Scraped image"}
+                            className="w-full h-full object-cover transition-transform group-hover:scale-105"
+                            onError={(e) => {
+                              const target = e.target as HTMLImageElement;
+                              target.src = "https://via.placeholder.com/150?text=Image+Error";
+                            }}
+                          />
+                          <div className="absolute inset-0 bg-black bg-opacity-0 group-hover:bg-opacity-30 transition-all flex items-end justify-center">
+                            <div className="p-2 translate-y-full group-hover:translate-y-0 transition-transform w-full bg-white bg-opacity-75">
+                              <p className="text-xs truncate">{image.alt_text || "No description"}</p>
+                              <a 
+                                href={image.url} 
+                                target="_blank" 
+                                rel="noopener noreferrer"
+                                className="text-xs text-blue-600 hover:underline flex items-center"
+                              >
+                                View original <HiExternalLink className="ml-1" size={12} />
+                              </a>
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    )) || []
+                  )}
+                </div>
+              ) : (
+                <p className="text-gray-500 italic">No images found in the scraped content</p>
+              )}
+            </div>
+          )}
+        </TabItem> */}
+
         <TabItem 
           title="Data Flow" 
           icon={HiChartPie}
@@ -604,6 +789,36 @@ export default function ProjectDetails() {
           {activeTab === 'data-flow' && (
             <div>
               <h3 className="text-lg font-semibold mb-4">Data Flow Visualization</h3>
+              
+              {/* Metrics Summary */}
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
+                <Card>
+                  <div className="text-center">
+                    <div className="text-3xl font-bold text-blue-600">{site_data.sitemap_pages?.length || 0}</div>
+                    <div className="text-sm text-gray-500">Pages Discovered</div>
+                  </div>
+                </Card>
+                <Card>
+                  <div className="text-center">
+                    <div className="text-3xl font-bold text-green-600">{scraped_content.length}</div>
+                    <div className="text-sm text-gray-500">Pages Scraped</div>
+                  </div>
+                </Card>
+                <Card>
+                  <div className="text-center">
+                    <div className="text-3xl font-bold text-purple-600">
+                      {scraped_content.reduce((sum, page) => {
+                        const textCount = page.content.text_content?.length || 0;
+                        const imageCount = page.content.images?.length || 0;
+                        return sum + textCount + imageCount;
+                      }, 0)}
+                    </div>
+                    <div className="text-sm text-gray-500">Elements Extracted</div>
+                  </div>
+                </Card>
+              </div>
+              
+              {/* Standard Flow Diagram */}
               <div className="flex flex-col items-center">
                 <div className="border-2 border-blue-500 rounded-lg p-3 bg-blue-50 w-64 text-center">
                   <h4 className="font-bold text-blue-700">Project</h4>
@@ -624,6 +839,33 @@ export default function ProjectDetails() {
                     <p className="text-xs">{scraped_content.length} pages</p>
                   </div>
                 </div>
+                
+                {/* Content breakdown */}
+                {scraped_content.length > 0 && (
+                  <div className="mt-6 w-full">
+                    <h5 className="font-semibold text-center mb-4">Content Breakdown</h5>
+                    <div className="flex justify-center gap-6">
+                      <div className="text-center p-3 rounded-lg bg-blue-50 border border-blue-200">
+                        <div className="text-2xl font-bold text-blue-600">
+                          {scraped_content.reduce((sum, page) => sum + (page.content.text_content?.length || 0), 0)}
+                        </div>
+                        <div className="text-xs text-gray-600">Text Elements</div>
+                      </div>
+                      <div className="text-center p-3 rounded-lg bg-pink-50 border border-pink-200">
+                        <div className="text-2xl font-bold text-pink-600">
+                          {scraped_content.reduce((sum, page) => sum + (page.content.images?.length || 0), 0)}
+                        </div>
+                        <div className="text-xs text-gray-600">Images</div>
+                      </div>
+                      <div className="text-center p-3 rounded-lg bg-purple-50 border border-purple-200">
+                        <div className="text-2xl font-bold text-purple-600">
+                          {scraped_content.reduce((sum, page) => sum + (page.content.image_texts?.length || 0), 0)}
+                        </div>
+                        <div className="text-xs text-gray-600">Image Texts</div>
+                      </div>
+                    </div>
+                  </div>
+                )}
               </div>
             </div>
           )}

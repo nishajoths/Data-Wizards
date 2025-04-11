@@ -164,7 +164,9 @@ export default function ProjectSuccess() {
               </Button>
             </Link>
             <Link to="/dashboard">
-              <Button color="light">Go to Dashboard</Button>
+              <Button color="light">
+                Return to Dashboard
+              </Button>
             </Link>
           </div>
         </Card>
