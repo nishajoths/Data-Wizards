@@ -317,7 +317,7 @@ export default function Dashboard() {
                                   className="flex items-center hover:text-blue-600"
                                   title={page}
                                 >
-                                  <span className="inline-block w-4 h-4 bg-blue-100 text-blue-800 rounded-full text-[10px] flex items-center justify-center mr-1.5">
+                                  <span className="w-4 h-4 bg-blue-100 text-blue-800 rounded-full text-[10px] flex items-center justify-center mr-1.5">
                                     {i+1}
                                   </span>
                                   {formatUrl(page)}

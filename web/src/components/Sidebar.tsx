@@ -12,8 +12,7 @@ export default function SidebarComponent() {
   const iconStyle = { size: 20, strokeWidth: 1.75 };
   
   return (
-    <div className="sticky top-0 h-screen w-64 border-r border-gray-200 bg-white shadow-sm overflow-y-auto z-10">
-      
+    <div className="sticky top-0 h-screen w-64 bg-white shadow-md overflow-y-auto overflow-x-hidden z-10">
       <Sidebar aria-label="Navigation sidebar" className="h-full border-none">
         <SidebarItems>
           <SidebarItemGroup>
@@ -64,4 +63,5 @@ export default function SidebarComponent() {
       </div>
     </div>
   );
+  
 }

@@ -217,14 +217,14 @@ export default function AddProject() {
   };
 
   return (
-    <div className="min-h-screen flex flex-col bg-gradient-to-r from-blue-50 to-white py-12 px-4 sm:px-6 lg:px-8">
+    <div className="container mx-auto px-4 py-6">
       <div className="max-w-3xl mx-auto w-full">
-        <div className="bg-white rounded-xl shadow-lg p-8 border border-blue-100 mb-6">
-          <div className="text-center mb-8"></div>
+        <Card className="border-gray-200 shadow-md mb-6">
+          <div className="text-center mb-6">
             <div className="inline-flex items-center justify-center w-16 h-16 rounded-full bg-blue-100 mb-4">
               <HiGlobe className="w-8 h-8 text-blue-600" />
             </div>
-            <h2 className="text-3xl font-extrabold text-gray-900">Add New Project</h2>
+            <h2 className="text-2xl font-bold text-gray-800">Add New Project</h2>
             <p className="mt-2 text-sm text-gray-600">Enter the URL of the website to analyze</p>
           </div>
           
@@ -268,7 +268,7 @@ export default function AddProject() {
                     color={verified ? (verificationDetails?.can_scrape ? "success" : "failure") : "light"}
                     onClick={handleVerify}
                     disabled={verifying || loading || !url.trim()}
-                    className="whitespace-nowrap"
+                    className="whitespace-nowrap transition-all hover:shadow"
                   >
                     {verifying ? (
                       <>
@@ -300,45 +300,45 @@ export default function AddProject() {
               </div>
               
               {verified && (
-                <div className="bg-gray-50 p-3 rounded-lg">
+                <div className="bg-gray-50 p-4 rounded-lg border border-gray-200">
                   <h4 className="text-sm font-medium text-gray-700 mb-2">Verification Results</h4>
-                  <div className="text-xs space-y-1">
+                  <div className="text-xs space-y-2">
                     {verificationDetails?.details?.robots_found ? (
-                      <div className="flex items-center">
+                      <div className="flex items-center p-1.5 bg-gray-100 rounded">
                         <Badge color="success" className="mr-2">robots.txt</Badge>
-                        <span>Found and analyzed</span>
+                        <span className="text-gray-700">Found and analyzed</span>
                       </div>
                     ) : (
-                      <div className="flex items-center">
+                      <div className="flex items-center p-1.5 bg-gray-100 rounded">
                         <Badge color="warning" className="mr-2">robots.txt</Badge>
-                        <span>Not found</span>
+                        <span className="text-gray-700">Not found</span>
                       </div>
                     )}
                     
                     {verificationDetails?.details?.terms_url ? (
-                      <div className="flex items-center">
+                      <div className="flex items-center p-1.5 bg-gray-100 rounded">
                         <Badge color="success" className="mr-2">Terms</Badge>
-                        <span>Found at {verificationDetails.details.terms_url}</span>
+                        <span className="text-gray-700 truncate flex-grow">Found at {verificationDetails.details.terms_url}</span>
                       </div>
                     ) : (
-                      <div className="flex items-center">
+                      <div className="flex items-center p-1.5 bg-gray-100 rounded">
                         <Badge color="warning" className="mr-2">Terms</Badge>
-                        <span>Not found</span>
+                        <span className="text-gray-700">Not found</span>
                       </div>
                     )}
                     
-                    <div className="flex items-center">
+                    <div className="flex items-center p-1.5 bg-gray-100 rounded">
                       <Badge color={verificationDetails?.can_scrape ? "success" : "failure"} className="mr-2">Result</Badge>
-                      <span>{verificationDetails?.message}</span>
+                      <span className="text-gray-700">{verificationDetails?.message}</span>
                     </div>
                   </div>
                 </div>
               )}
               
               {/* Keywords search section */}
-              <Card className="mb-4">
-                <h3 className="text-lg font-bold mb-4 flex items-center gap-2">
-                  <HiSearch className="text-blue-500" />
+              <Card className="mb-4 border border-gray-200">
+                <h3 className="text-lg font-medium mb-4 flex items-center gap-2 text-gray-800">
+                  <HiSearch className="text-blue-600" />
                   Keywords Search Filter
                 </h3>
                 
@@ -361,19 +361,21 @@ export default function AddProject() {
                         type="button"
                         onClick={handleAddKeyword}
                         disabled={!searchKeyword.trim()}
-                        color="light"
+                        color="blue"
+                        outline
+                        className="hover:shadow transition-all"
                       >
                         <HiPlus className="mr-1 h-4 w-4" /> Add
                       </Button>
                     </div>
                     
-                    <div className="flex items-center mt-1">
+                    <div className="flex items-center mt-2 bg-blue-50 p-2 rounded">
                       <input
                         id="include-meta"
                         type="checkbox"
                         checked={includeMeta}
                         onChange={(e) => setIncludeMeta(e.target.checked)}
-                        className="w-4 h-4 text-blue-600 rounded"
+                        className="w-4 h-4 text-blue-600 rounded focus:ring-blue-500"
                       />
                       <Label htmlFor="include-meta" className="ml-2 text-sm text-gray-600">
                         Search in meta information (title, description, keywords)
@@ -382,20 +384,21 @@ export default function AddProject() {
                   </div>
                   
                   {searchKeywords.length > 0 && (
-                    <div>
+                    <div className="bg-gray-50 p-3 rounded-lg border border-gray-200">
                       <Label className="text-sm font-medium text-gray-700 block mb-2">
                         Current keywords:
                       </Label>
                       <div className="flex flex-wrap gap-2">
                         {searchKeywords.map((keyword, index) => (
-                          <div key={index} className="flex items-center bg-blue-100 text-blue-800 px-2 py-1 rounded-lg">
-                            <span className="mr-1">{keyword}</span>
+                          <div key={index} className="flex items-center bg-blue-100 text-blue-800 px-2.5 py-1.5 rounded-lg hover:bg-blue-200 transition-colors">
+                            <span className="mr-2 font-medium">{keyword}</span>
                             <button
                               type="button"
                               onClick={() => handleRemoveKeyword(keyword)}
-                              className="text-blue-600 hover:text-blue-800"
+                              className="text-blue-700 hover:text-blue-900 transition-colors"
+                              aria-label={`Remove keyword ${keyword}`}
                             >
-                              <HiTrash className="h-3 w-3" />
+                              <HiTrash className="h-3.5 w-3.5" />
                             </button>
                           </div>
                         ))}
@@ -414,7 +417,7 @@ export default function AddProject() {
               <Button
                 type="submit"
                 color="blue"
-                className="w-full"
+                className="w-full hover:shadow-md transition-all"
                 disabled={loading || !url.trim() || !verified}  // Require verification
               >
                 {loading ? (
@@ -428,16 +431,18 @@ export default function AddProject() {
               </Button>
               
               {!verified && url.trim() && (
-                <div className="text-center mt-2">
-                  <p className="text-yellow-600 text-sm">
+                <div className="text-center mt-2 bg-yellow-50 p-2 rounded-lg border border-yellow-100">
+                  <p className="text-yellow-700 text-sm flex items-center justify-center">
+                    <HiExclamationCircle className="mr-1.5 h-4 w-4" />
                     Please verify the URL before starting analysis
                   </p>
                 </div>
               )}
               
               {verified && !verificationDetails?.can_scrape && (
-                <div className="text-center mt-2">
-                  <p className="text-yellow-600 text-sm">
+                <div className="text-center mt-2 bg-yellow-50 p-2 rounded-lg border border-yellow-100">
+                  <p className="text-yellow-700 text-sm flex items-center justify-center">
+                    <HiExclamationCircle className="mr-1.5 h-4 w-4" />
                     Warning: This website might not allow scraping. Proceed with caution.
                   </p>
                 </div>
@@ -446,16 +451,14 @@ export default function AddProject() {
           )}
           
           {clientId && (
-            <div className="space-y-4">
-              <Alert color="success">
-                <p className="font-medium">Project successfully created!</p>
-                <p className="text-sm mt-1">
+            <div className="space-y-5">
+              <Alert color="success" className="border border-green-200 bg-green-50">
+                <p className="font-medium text-green-800">Project successfully created!</p>
+                <p className="text-sm mt-1 text-green-700">
                   The extraction process is now running in the background. You can see the real-time logs below.
-                  Use the interrupt button to stop the extraction process if needed.
                 </p>
-                <p className="text-sm mt-1 font-medium">
+                <p className="text-sm mt-2 font-medium text-green-800 bg-green-100 p-2 rounded">
                   Note: The extraction continues as a background process on the server even if you close this page.
-                  <br/>You'll be automatically redirected to the project details when extraction completes.
                 </p>
               </Alert>
               
@@ -464,22 +467,24 @@ export default function AddProject() {
                 onComplete={handleExtractionComplete}
               />
               
-              <div className="text-center text-sm text-gray-500 mt-4 p-3 border border-gray-200 rounded-lg bg-gray-50">
-                <p>The data extraction will continue in the background even if you close this window.</p>
-                <p>You can return to your dashboard and view your projects at any time.</p>
+              <div className="text-center mt-4 p-4 border border-gray-200 rounded-lg bg-gray-50 shadow-sm">
+                <p className="text-gray-700">The data extraction will continue in the background even if you close this window.</p>
+                <p className="text-gray-700 mb-3">You can return to your dashboard and view your projects at any time.</p>
                 <Button 
-                  color="light" 
+                  color="blue"
+                  outline
                   size="sm"
                   onClick={() => navigate('/dashboard')}
-                  className="mt-2"
+                  className="hover:shadow transition-all"
                 >
                   Back to Dashboard
                 </Button>
               </div>
             </div>
           )}
-        </div>
+        </Card>
       </div>
+    </div>
   );
 }
 

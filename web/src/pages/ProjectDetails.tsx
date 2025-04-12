@@ -6,7 +6,8 @@ import {
   HiArrowLeft, HiLink, HiGlobe, HiExclamationCircle, 
   HiCode, HiDocumentText, HiTable, HiOutlineCog,
   HiChartPie, HiTrash, HiLightningBolt, HiPhotograph, 
-  HiExternalLink, HiInformationCircle, HiRefresh, HiCheckCircle
+  HiExternalLink, HiInformationCircle, HiRefresh, HiCheckCircle,
+  HiDocumentDownload, HiCalendar
 } from 'react-icons/hi';
 import DeleteConfirmationModal from "../components/DeleteConfirmationModal";
 import NetworkAnalytics from '../components/NetworkAnalytics';
@@ -171,6 +172,109 @@ const STATUS_INTERRUPTED = "interrupted";
 const STATUS_ERROR = "error";
 const STATUS_RUNNING = "running";
 
+const downloadJson = (data: any, filename: string) => {
+  const jsonString = JSON.stringify(data, null, 2);
+  const blob = new Blob([jsonString], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+};
+
+const downloadCsv = (data: VisitedLink[], filename: string) => {
+  const columns = [
+    'url', 'text', 'has_keyword', 'matching_keywords', 'source_page', 
+    'scraped', 'scraped_at', 'text_elements', 'images', 'size_bytes', 
+    'load_time_ms', 'new_links_found', 'product_name', 'product_price',
+    'product_currency', 'product_brand', 'error'
+  ];
+  
+  let csv = columns.join(',') + '\n';
+  
+  data.forEach(link => {
+    const row = [
+      `"${link.url || ''}"`,
+      `"${(link.text || '').replace(/"/g, '""')}"`,
+      link.has_keyword ? 'true' : 'false',
+      `"${link.matching_keywords ? link.matching_keywords.join('; ') : ''}"`,
+      `"${link.source_page || ''}"`,
+      link.scraped ? 'true' : 'false',
+      `"${link.scraped_at || ''}"`,
+      link.content_summary?.text_elements || 0,
+      link.content_summary?.images || 0,
+      link.content_summary?.size_bytes || 0,
+      link.content_summary?.load_time_ms || 0,
+      link.content_summary?.new_links_found || 0,
+      `"${link.product_info?.name || ''}"`,
+      `"${link.product_info?.price || ''}"`,
+      `"${link.product_info?.currency || ''}"`,
+      `"${link.product_info?.brand || ''}"`,
+      `"${link.error || ''}"`
+    ];
+    csv += row.join(',') + '\n';
+  });
+  
+  const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+};
+
+const downloadContentJson = (content: ScrapedContent[], filename: string) => {
+  const jsonString = JSON.stringify(content, null, 2);
+  const blob = new Blob([jsonString], { type: 'application/json' });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+};
+
+const downloadContentText = (content: ScrapedContent, filename: string) => {
+  let textContent = `URL: ${content.url}\n\n`;
+  textContent += `--- TEXT CONTENT ---\n\n`;
+  
+  content.content.text_content?.forEach((text, index) => {
+    if (text.content) {
+      textContent += `[${index + 1}] ${text.content}\n\n`;
+    }
+  });
+  
+  textContent += `\n--- IMAGES ---\n\n`;
+  content.content.images?.forEach((image, index) => {
+    textContent += `[${index + 1}] ${image.url}\n`;
+    if (image.alt_text) textContent += `Alt: ${image.alt_text}\n`;
+    textContent += '\n';
+  });
+  
+  if (content.content.image_texts?.length) {
+    textContent += `\n--- IMAGE TEXT EXTRACTIONS ---\n\n`;
+    content.content.image_texts.forEach((imgText, index) => {
+      if (imgText.extracted_text) {
+        textContent += `[${index + 1}] ${imgText.extracted_text}\n\n`;
+      }
+    });
+  }
+  
+  const blob = new Blob([textContent], { type: 'text/plain' });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+};
+
 export default function ProjectDetails() {
   const { projectId } = useParams<{ projectId: string }>();
   const location = useLocation();
@@ -192,6 +296,7 @@ export default function ProjectDetails() {
   const [projectVisitedLinks, setProjectVisitedLinks] = useState<ProjectVisitedLinks | null>(null);
   const [visitedLinksLoading, setVisitedLinksLoading] = useState(false);
   const [showExtractedNotice, setShowExtractedNotice] = useState(false);
+  const [activeDropdown, setActiveDropdown] = useState<string | null>(null);
   const extractionStatus = location.state?.processingStatus || null;
 
   const getStatusBadge = (status: string) => {
@@ -224,7 +329,6 @@ export default function ProjectDetails() {
   useEffect(() => {
     if (location.state?.fromExtraction) {
       setShowExtractedNotice(true);
-      // Auto-hide after 10 seconds
       const timer = setTimeout(() => {
         setShowExtractedNotice(false);
       }, 10000);
@@ -500,7 +604,6 @@ export default function ProjectDetails() {
 
   return (
     <div className="container mx-auto px-4 py-8">
-      {/* Show notification when coming from extraction */}
       {showExtractedNotice && (
         <Alert color="success" className="mb-6" onDismiss={() => setShowExtractedNotice(false)}>
           <div className="flex items-center gap-3">
@@ -537,7 +640,7 @@ export default function ProjectDetails() {
         </Alert>
       )}
 
-      <Link to="/dashboard" className="flex items-center text-blue-600 hover:underline mb-6">
+      <Link to="/dashboard" className="flex items-center text-blue-600 hover:text-blue-800 mb-6">
         <HiArrowLeft className="mr-2" /> Back to Dashboard
       </Link>
 
@@ -582,7 +685,7 @@ export default function ProjectDetails() {
               href={url} 
               target="_blank" 
               rel="noopener noreferrer"
-              className="text-blue-600 hover:underline flex items-center gap-1"
+              className="text-blue-600 hover:text-blue-800 flex items-center gap-1"
             >
               {url} <HiLink className="inline" />
             </a>
@@ -774,7 +877,7 @@ export default function ProjectDetails() {
                 <ul className="list-disc pl-5 text-gray-600">
                   {(site_data.sitemap_urls ?? []).map((url, index) => (
                     <li key={index}>
-                      <a href={url} target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:underline">
+                      <a href={url} target="_blank" rel="noopener noreferrer" className="text-blue-600 hover:text-blue-800">
                         {url}
                       </a>
                     </li>
@@ -826,7 +929,6 @@ export default function ProjectDetails() {
                     </thead>
                     <tbody>
                       {site_data.sitemap_pages.map((page, index) => {
-                        // Check if this page was successfully scraped
                         const isScraped = scraped_content.some(content => content.url === page);
                         
                         return (
@@ -836,7 +938,7 @@ export default function ProjectDetails() {
                                 href={page} 
                                 target="_blank" 
                                 rel="noopener noreferrer" 
-                                className="text-blue-600 hover:underline flex items-center"
+                                className="text-blue-600 hover:text-blue-800 flex items-center"
                               >
                                 <span className="truncate max-w-md inline-block">{page}</span>
                                 <HiExternalLink className="ml-1 flex-shrink-0" />
@@ -875,27 +977,161 @@ export default function ProjectDetails() {
         >
           {activeTab === 'content' && (
             <div>
-              <h3 className="text-lg font-semibold mb-4">Scraped Content</h3>
+              <div className="flex justify-between items-center mb-4">
+                <h3 className="text-lg font-semibold">Scraped Content</h3>
+                
+                {scraped_content.length > 0 && (
+                  <div className="relative">
+                    <Button 
+                      color="blue"
+                      onClick={() => setActiveDropdown(activeDropdown === 'downloadAll' ? null : 'downloadAll')}
+                      className="flex items-center gap-2"
+                    >
+                      <HiDocumentDownload className="h-5 w-5" />
+                      Download All
+                    </Button>
+                    
+                    {activeDropdown === 'downloadAll' && (
+                      <div className="absolute right-0 mt-2 w-48 bg-white rounded-md shadow-lg z-10 border border-gray-200">
+                        <ul>
+                          <li>
+                            <button
+                              className="w-full text-left px-4 py-2 text-sm text-gray-700 hover:bg-gray-100"
+                              onClick={() => {
+                                downloadContentJson(scraped_content, `content_${projectId}_${new Date().toISOString().split('T')[0]}.json`);
+                                setActiveDropdown(null);
+                              }}
+                            >
+                              JSON (All Data)
+                            </button>
+                          </li>
+                          <li>
+                            <button
+                              className="w-full text-left px-4 py-2 text-sm text-gray-700 hover:bg-gray-100"
+                              onClick={() => {
+                                const textContent = scraped_content.map(page => {
+                                  let content = `# ${page.url}\n\n`;
+                                  page.content.text_content?.forEach(text => {
+                                    if (text.content) content += `${text.content}\n\n`;
+                                  });
+                                  return content;
+                                }).join('\n---\n\n');
+                                
+                                const blob = new Blob([textContent], { type: 'text/plain' });
+                                const url = URL.createObjectURL(blob);
+                                const link = document.createElement('a');
+                                link.href = url;
+                                link.download = `content_${projectId}_${new Date().toISOString().split('T')[0]}.txt`;
+                                document.body.appendChild(link);
+                                link.click();
+                                document.body.removeChild(link);
+                                setActiveDropdown(null);
+                              }}
+                            >
+                              Text Only (.txt)
+                            </button>
+                          </li>
+                          <li>
+                            <button
+                              className="w-full text-left px-4 py-2 text-sm text-gray-700 hover:bg-gray-100"
+                              onClick={() => {
+                                const csvContent = 'data:text/csv;charset=utf-8,' + 
+                                  'URL,Text Content\n' + 
+                                  scraped_content.map(page => {
+                                    const textContent = page.content.text_content
+                                      ?.map(text => text.content?.replace(/"/g, '""'))
+                                      .filter(Boolean)
+                                      .join(' ');
+                                    return `"${page.url}","${textContent}"`;
+                                  }).join('\n');
+                                
+                                const encodedUri = encodeURI(csvContent);
+                                const link = document.createElement('a');
+                                link.href = encodedUri;
+                                link.download = `content_${projectId}_${new Date().toISOString().split('T')[0]}.csv`;
+                                document.body.appendChild(link);
+                                link.click();
+                                document.body.removeChild(link);
+                                setActiveDropdown(null);
+                              }}
+                            >
+                              CSV Format
+                            </button>
+                          </li>
+                        </ul>
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
+              
               {scraped_content.length > 0 ? (
                 <div className="space-y-8">
                   {scraped_content.map((content, index) => (
                     <Card key={index} className="overflow-hidden">
-                      <div className="border-b pb-2 mb-4">
-                        <h4 className="font-bold text-lg text-blue-700 truncate">
-                          <a href={content.url} target="_blank" rel="noopener noreferrer" className="hover:underline flex items-center">
-                            {content.url} <HiLink className="ml-1" size={16} />
-                          </a>
-                        </h4>
-                        <div className="flex gap-2 text-xs text-gray-500 mt-1">
-                          <span>{content.content.text_content?.length || 0} text items</span>
-                          <span>•</span>
-                          <span>{content.content.images?.length || 0} images</span>
-                          <span>•</span>
-                          <span>{content.content.image_texts?.length || 0} image texts</span>
+                      <div className="border-b pb-2 mb-4 flex justify-between items-center">
+                        <div>
+                          <h4 className="font-bold text-lg text-blue-700 truncate">
+                            <a 
+                              href={content.url} 
+                              target="_blank" 
+                              rel="noopener noreferrer" 
+                              className="hover:text-blue-900 flex items-center"
+                            >
+                              {content.url} <HiLink className="ml-1" size={16} />
+                            </a>
+                          </h4>
+                          <div className="flex gap-2 text-xs text-gray-500 mt-1">
+                            <span>{content.content.text_content?.length || 0} text items</span>
+                            <span>•</span>
+                            <span>{content.content.images?.length || 0} images</span>
+                            <span>•</span>
+                            <span>{content.content.image_texts?.length || 0} image texts</span>
+                          </div>
+                        </div>
+                        
+                        <div className="relative">
+                          <Button 
+                            color="light" 
+                            size="xs"
+                            onClick={() => setActiveDropdown(activeDropdown === `download-${index}` ? null : `download-${index}`)}
+                            className="flex items-center gap-1"
+                          >
+                            <HiDocumentDownload className="h-4 w-4" />
+                            Download
+                          </Button>
+                          
+                          {activeDropdown === `download-${index}` && (
+                            <div className="absolute right-0 mt-1 w-40 bg-white rounded-md shadow-lg z-10 border border-gray-200">
+                              <ul>
+                                <li>
+                                  <button
+                                    className="w-full text-left px-3 py-2 text-xs text-gray-700 hover:bg-gray-100"
+                                    onClick={() => {
+                                      downloadContentJson([content], `page_${index}_${new Date().toISOString().split('T')[0]}.json`);
+                                      setActiveDropdown(null);
+                                    }}
+                                  >
+                                    JSON Format
+                                  </button>
+                                </li>
+                                <li>
+                                  <button
+                                    className="w-full text-left px-3 py-2 text-xs text-gray-700 hover:bg-gray-100"
+                                    onClick={() => {
+                                      downloadContentText(content, `page_${index}_${new Date().toISOString().split('T')[0]}.txt`);
+                                      setActiveDropdown(null);
+                                    }}
+                                  >
+                                    Text Format
+                                  </button>
+                                </li>
+                              </ul>
+                            </div>
+                          )}
                         </div>
                       </div>
                       
-                      {/* Text Content Section */}
                       {content.content.text_content?.length > 0 && (
                         <div className="mb-4">
                           <h5 className="font-semibold text-gray-700 mb-2">Text Content</h5>
@@ -909,7 +1145,6 @@ export default function ProjectDetails() {
                         </div>
                       )}
                       
-                      {/* Images Section */}
                       {content.content.images?.length > 0 && (
                         <div className="mb-4">
                           <h5 className="font-semibold text-gray-700 mb-2">Images</h5>
@@ -936,7 +1171,6 @@ export default function ProjectDetails() {
                         </div>
                       )}
                       
-                      {/* Extracted Text from Images Section */}
                       {content.content.image_texts?.length > 0 && (
                         <div>
                           <h5 className="font-semibold text-gray-700 mb-2">Text Extracted from Images</h5>
@@ -1004,7 +1238,7 @@ export default function ProjectDetails() {
                                 href={image.url} 
                                 target="_blank" 
                                 rel="noopener noreferrer"
-                                className="text-xs text-blue-600 hover:underline flex items-center"
+                                className="text-xs text-blue-600 hover:text-blue-800 flex items-center"
                               >
                                 View original <HiExternalLink className="ml-1" size={12} />
                               </a>
@@ -1031,7 +1265,6 @@ export default function ProjectDetails() {
             <div>
               <h3 className="text-lg font-semibold mb-4">Data Flow Visualization</h3>
               
-              {/* Metrics Summary */}
               <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
                 <Card>
                   <div className="text-center">
@@ -1059,7 +1292,6 @@ export default function ProjectDetails() {
                 </Card>
               </div>
               
-              {/* Standard Flow Diagram */}
               <div className="flex flex-col items-center">
                 <div className="border-2 border-blue-500 rounded-lg p-3 bg-blue-50 w-64 text-center">
                   <h4 className="font-bold text-blue-700">Project</h4>
@@ -1081,7 +1313,6 @@ export default function ProjectDetails() {
                   </div>
                 </div>
                 
-                {/* Content breakdown */}
                 {scraped_content.length > 0 && (
                   <div className="mt-6 w-full">
                     <h5 className="font-semibold text-center mb-4">Content Breakdown</h5>
@@ -1289,7 +1520,7 @@ export default function ProjectDetails() {
                                   href={link.url} 
                                   target="_blank" 
                                   rel="noopener noreferrer" 
-                                  className="text-blue-600 hover:underline flex items-center"
+                                  className="text-blue-600 hover:text-blue-800 flex items-center"
                                 >
                                   <span className="truncate max-w-xs inline-block">{link.url}</span>
                                   <HiExternalLink className="ml-1 flex-shrink-0" />
@@ -1314,7 +1545,7 @@ export default function ProjectDetails() {
                                     href={link.source_page} 
                                     target="_blank" 
                                     rel="noopener noreferrer" 
-                                    className="text-blue-600 hover:underline"
+                                    className="text-blue-600 hover:text-blue-800"
                                   >
                                     {new URL(link.source_page).pathname}
                                   </a>
@@ -1342,7 +1573,10 @@ export default function ProjectDetails() {
           {activeTab === 'visited-links' && (
             <div className="space-y-6">
               <Card>
-                <h3 className="text-xl font-bold mb-4">Visited Links & Their Content</h3>
+                <h3 className="text-xl font-bold mb-4 flex items-center gap-2">
+                  <HiExternalLink className="text-blue-600" />
+                  Visited Links & Their Content
+                </h3>
                 {visitedLinksLoading ? (
                   <div className="flex justify-center py-8">
                     <Spinner size="xl" />
@@ -1380,9 +1614,11 @@ export default function ProjectDetails() {
                       </Card>
                     </div>
                     
-                    {/* Network Statistics Summary */}
                     <div className="mb-6">
-                      <h3 className="text-lg font-semibold mb-3">Network Performance</h3>
+                      <h3 className="text-lg font-semibold mb-3 flex items-center gap-2">
+                        <HiLightningBolt className="text-yellow-500" />
+                        Network Performance
+                      </h3>
                       <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
                         <Card>
                           <div className="text-center">
@@ -1422,6 +1658,57 @@ export default function ProjectDetails() {
                       </div>
                     </div>
                     
+                    <div className="flex justify-end gap-2 mb-4">
+                      <Button 
+                        color="blue" 
+                        size="sm"
+                        onClick={() => downloadCsv(projectVisitedLinks.links, `visited_links_${projectId}_${new Date().toISOString().split('T')[0]}.csv`)}
+                        className="flex items-center gap-1"
+                      >
+                        <HiDocumentDownload className="mr-2 h-5 w-5" />
+                        Download CSV
+                      </Button>
+                      <Button 
+                        color="green" 
+                        size="sm"
+                        onClick={() => downloadJson(projectVisitedLinks, `visited_links_${projectId}_${new Date().toISOString().split('T')[0]}.json`)}
+                        className="flex items-center gap-1"
+                      >
+                        <HiDocumentDownload className="mr-2 h-5 w-5" />
+                        Download JSON
+                      </Button>
+                    </div>
+                    
+                    <Card className="mb-4">
+                      <h4 className="font-medium text-gray-800 mb-2 flex items-center gap-2">
+                        <HiInformationCircle className="text-blue-600" />
+                        Data Structure Information
+                      </h4>
+                      <p className="text-sm text-gray-600 mb-2">
+                        Below is the data structure of visited links. Each row represents a link that was discovered and potentially scraped.
+                      </p>
+                      <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
+                        <div className="bg-gray-50 p-2 rounded">
+                          <p className="text-xs font-medium text-gray-600">Link Properties:</p>
+                          <ul className="text-xs text-gray-600 list-disc pl-5">
+                            <li>URL and link text</li>
+                            <li>Source page where link was found</li>
+                            <li>Keyword matches (if any)</li>
+                            <li>Scrape status (successful/failed)</li>
+                          </ul>
+                        </div>
+                        <div className="bg-gray-50 p-2 rounded">
+                          <p className="text-xs font-medium text-gray-600">Content Summary:</p>
+                          <ul className="text-xs text-gray-600 list-disc pl-5">
+                            <li>Text elements and images count</li>
+                            <li>Page size and load time</li>
+                            <li>Product information (if detected)</li>
+                            <li>Error messages (if any)</li>
+                          </ul>
+                        </div>
+                      </div>
+                    </Card>
+                    
                     <div className="overflow-x-auto">
                       <table className="w-full text-sm text-left text-gray-500">
                         <thead className="text-xs text-gray-700 uppercase bg-gray-50">
@@ -1447,7 +1734,7 @@ export default function ProjectDetails() {
                                   href={link.url} 
                                   target="_blank" 
                                   rel="noopener noreferrer" 
-                                  className="text-blue-600 hover:underline flex items-center"
+                                  className="text-blue-600 hover:text-blue-800 flex items-center"
                                 >
                                   <span className="truncate max-w-xs inline-block">{link.url}</span>
                                   <HiExternalLink className="ml-1 flex-shrink-0" />
@@ -1530,7 +1817,7 @@ export default function ProjectDetails() {
                                     href={link.source_page} 
                                     target="_blank" 
                                     rel="noopener noreferrer" 
-                                    className="text-blue-600 hover:underline"
+                                    className="text-blue-600 hover:text-blue-800"
                                   >
                                     {new URL(link.source_page).pathname}
                                   </a>
