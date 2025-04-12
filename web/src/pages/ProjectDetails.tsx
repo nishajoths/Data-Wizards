@@ -6,7 +6,7 @@ import {
   HiArrowLeft, HiLink, HiGlobe, HiExclamationCircle, 
   HiCode, HiDocumentText, HiTable, HiOutlineCog,
   HiChartPie, HiTrash, HiLightningBolt, HiPhotograph, 
-  HiExternalLink, HiInformationCircle
+  HiExternalLink, HiInformationCircle, HiRefresh
 } from 'react-icons/hi';
 import DeleteConfirmationModal from "../components/DeleteConfirmationModal";
 import NetworkAnalytics from '../components/NetworkAnalytics';
@@ -92,6 +92,58 @@ interface ProcessingStatus {
   };
 }
 
+// Interface for extracted links
+interface ExtractedLink {
+  url: string;
+  text: string;
+  has_keyword: boolean;
+  matching_keywords?: string[];
+  source_page?: string;
+}
+
+interface ProjectLinks {
+  project_id: string;
+  links_count: number;
+  links_with_keywords: number;
+  links: ExtractedLink[];
+}
+
+interface VisitedLink extends ExtractedLink {
+  scraped: boolean;
+  scraped_at?: string;
+  content_summary?: {
+    text_elements: number;
+    images: number;
+    size_bytes: number;
+    load_time_ms?: number;
+    new_links_found?: number;
+  };
+  product_info?: {
+    name?: string;
+    description?: string;
+    price?: string;
+    currency?: string;
+    brand?: string;
+    image_url?: string;
+    availability?: string;
+  };
+  error?: string;
+}
+
+interface ProjectVisitedLinks {
+  project_id: string;
+  links_count: number;
+  links_scraped: number;
+  links_with_keywords: number;
+  links: VisitedLink[];
+  network_stats?: {
+    avg_load_time_ms?: number;
+    avg_size_kb?: number;
+    total_errors?: number;
+    fastest_load_ms?: number;
+  };
+}
+
 // Main interface for complete project data
 interface CompleteProjectData {
   _id: string;
@@ -128,6 +180,10 @@ export default function ProjectDetails() {
   const [deleteLoading, setDeleteLoading] = useState(false);
   const [deleteError, setDeleteError] = useState<string | null>(null);
   const [selectedPageMetadata, setSelectedPageMetadata] = useState<PageMetadata | null>(null);
+  const [projectLinks, setProjectLinks] = useState<ProjectLinks | null>(null);
+  const [linksLoading, setLinksLoading] = useState(false);
+  const [projectVisitedLinks, setProjectVisitedLinks] = useState<ProjectVisitedLinks | null>(null);
+  const [visitedLinksLoading, setVisitedLinksLoading] = useState(false);
 
   useEffect(() => {
     const fetchProject = async () => {
@@ -233,6 +289,66 @@ export default function ProjectDetails() {
     }
   };
   
+  const fetchProjectLinks = async () => {
+    if (!projectId || !token) return;
+    
+    try {
+      setLinksLoading(true);
+      const response = await fetch(`http://localhost:8000/projects/${projectId}/links`, {
+        headers: {
+          Authorization: `Bearer ${token}`
+        }
+      });
+      
+      if (!response.ok) {
+        throw new Error(`Failed to fetch project links: ${response.status}`);
+      }
+      
+      const data = await response.json();
+      setProjectLinks(data);
+    } catch (err) {
+      console.error("Error fetching project links:", err);
+    } finally {
+      setLinksLoading(false);
+    }
+  };
+  
+  const fetchProjectVisitedLinks = async () => {
+    if (!projectId || !token) return;
+    
+    try {
+      setVisitedLinksLoading(true);
+      const response = await fetch(`http://localhost:8000/projects/${projectId}/visited_links`, {
+        headers: {
+          Authorization: `Bearer ${token}`
+        }
+      });
+      
+      if (!response.ok) {
+        throw new Error(`Failed to fetch project visited links: ${response.status}`);
+      }
+      
+      const data = await response.json();
+      setProjectVisitedLinks(data);
+    } catch (err) {
+      console.error("Error fetching project visited links:", err);
+    } finally {
+      setVisitedLinksLoading(false);
+    }
+  };
+  
+  useEffect(() => {
+    if (activeTab === 'links' && !projectLinks && !linksLoading) {
+      fetchProjectLinks();
+    }
+  }, [activeTab, projectLinks, linksLoading]);
+
+  useEffect(() => {
+    if (activeTab === 'visited-links' && !projectVisitedLinks && !visitedLinksLoading) {
+      fetchProjectVisitedLinks();
+    }
+  }, [activeTab, projectVisitedLinks, visitedLinksLoading]);
+
   const handleDeleteClick = () => {
     setDeleteModalOpen(true);
     setDeleteError(null);
@@ -483,7 +599,7 @@ export default function ProjectDetails() {
         aria-label="Project tabs" 
         className="underline"
         onActiveTabChange={(tabIndex) => {
-          const tabs = ['overview', 'robots', 'pages', 'content', 'images', 'data-flow', 'network', 'metadata'];
+          const tabs = ['overview', 'robots', 'pages', 'content', 'images', 'data-flow', 'network', 'metadata', 'links', 'visited-links'];
           setActiveTab(tabs[tabIndex]);
         }}
       >
@@ -525,6 +641,22 @@ export default function ProjectDetails() {
                 ) : (
                   <p className="text-gray-500 italic">No errors encountered</p>
                 )}
+              </Card>
+
+              <Card>
+                <div className="p-4 border rounded-lg bg-white">
+                  <div className="flex items-center">
+                    <HiInformationCircle className="w-6 h-6 text-blue-500" />
+                    <div className="ml-3">
+                      <h3 className="font-medium">Scraping Mode</h3>
+                      <p className="text-sm text-gray-500">
+                        {processing_status.scrape_mode === 'all'
+                          ? 'All pages were targeted for scraping'
+                          : `Limited to ${processing_status.pages_limit || 5} pages`}
+                      </p>
+                    </div>
+                  </div>
+                </div>
               </Card>
             </div>
           )}
@@ -998,6 +1130,339 @@ export default function ProjectDetails() {
                     </div>
                   )}
                 </div>
+              </Card>
+            </div>
+          )}
+        </TabItem>
+
+        <TabItem 
+          title="Links" 
+          icon={HiLink}
+          active={activeTab === 'links'}
+        >
+          {activeTab === 'links' && (
+            <div className="space-y-6">
+              <Card>
+                <h3 className="text-xl font-bold mb-4">Extracted Links</h3>
+                {linksLoading ? (
+                  <div className="flex justify-center py-8">
+                    <Spinner size="xl" />
+                  </div>
+                ) : !projectLinks ? (
+                  <div className="text-center py-6">
+                    <p className="text-gray-500">No link data available</p>
+                    <Button color="blue" className="mt-4" onClick={fetchProjectLinks}>
+                      <HiRefresh className="mr-2" />
+                      Fetch Links Data
+                    </Button>
+                  </div>
+                ) : (
+                  <>
+                    <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
+                      <Card>
+                        <div className="text-center">
+                          <div className="text-3xl font-bold text-blue-600">{projectLinks.links_count}</div>
+                          <div className="text-sm text-gray-500">Total Links</div>
+                        </div>
+                      </Card>
+                      <Card>
+                        <div className="text-center">
+                          <div className="text-3xl font-bold text-green-600">{projectLinks.links_with_keywords}</div>
+                          <div className="text-sm text-gray-500">Links with Keywords</div>
+                        </div>
+                      </Card>
+                      <Card>
+                        <div className="text-center">
+                          <div className="text-3xl font-bold text-purple-600">
+                            {Math.round((projectLinks.links_with_keywords / (projectLinks.links_count || 1)) * 100)}%
+                          </div>
+                          <div className="text-sm text-gray-500">Keyword Match Rate</div>
+                        </div>
+                      </Card>
+                    </div>
+                    
+                    <div className="overflow-x-auto">
+                      <table className="w-full text-sm text-left text-gray-500">
+                        <thead className="text-xs text-gray-700 uppercase bg-gray-50">
+                          <tr>
+                            <th scope="col" className="px-4 py-3">Link Text</th>
+                            <th scope="col" className="px-4 py-3">URL</th>
+                            <th scope="col" className="px-4 py-3">Keywords</th>
+                            <th scope="col" className="px-4 py-3">Source</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {projectLinks.links.map((link, index) => (
+                            <tr key={index} className={`bg-white border-b hover:bg-gray-50 ${link.has_keyword ? 'bg-green-50' : ''}`}>
+                              <td className="px-4 py-3 font-medium">
+                                {link.text || "[No text]"}
+                              </td>
+                              <td className="px-4 py-3">
+                                <a 
+                                  href={link.url} 
+                                  target="_blank" 
+                                  rel="noopener noreferrer" 
+                                  className="text-blue-600 hover:underline flex items-center"
+                                >
+                                  <span className="truncate max-w-xs inline-block">{link.url}</span>
+                                  <HiExternalLink className="ml-1 flex-shrink-0" />
+                                </a>
+                              </td>
+                              <td className="px-4 py-3">
+                                {link.has_keyword ? (
+                                  <div className="flex flex-wrap gap-1">
+                                    {link.matching_keywords?.map((kw, kwIndex) => (
+                                      <span key={kwIndex} className="bg-green-100 text-green-800 text-xs font-medium px-2 py-0.5 rounded">
+                                        {kw}
+                                      </span>
+                                    ))}
+                                  </div>
+                                ) : (
+                                  <span className="text-gray-400">None</span>
+                                )}
+                              </td>
+                              <td className="px-4 py-3 text-xs">
+                                {link.source_page ? (
+                                  <a 
+                                    href={link.source_page} 
+                                    target="_blank" 
+                                    rel="noopener noreferrer" 
+                                    className="text-blue-600 hover:underline"
+                                  >
+                                    {new URL(link.source_page).pathname}
+                                  </a>
+                                ) : (
+                                  <span className="text-gray-400">Unknown</span>
+                                )}
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </>
+                )}
+              </Card>
+            </div>
+          )}
+        </TabItem>
+
+        <TabItem 
+          title="Visited Links" 
+          icon={HiExternalLink}
+          active={activeTab === 'visited-links'}
+        >
+          {activeTab === 'visited-links' && (
+            <div className="space-y-6">
+              <Card>
+                <h3 className="text-xl font-bold mb-4">Visited Links & Their Content</h3>
+                {visitedLinksLoading ? (
+                  <div className="flex justify-center py-8">
+                    <Spinner size="xl" />
+                  </div>
+                ) : !projectVisitedLinks ? (
+                  <div className="text-center py-6">
+                    <p className="text-gray-500">No visited link data available</p>
+                    <Button color="blue" className="mt-4" onClick={fetchProjectVisitedLinks}>
+                      <HiRefresh className="mr-2" />
+                      Fetch Visited Links Data
+                    </Button>
+                  </div>
+                ) : (
+                  <>
+                    <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-6">
+                      <Card>
+                        <div className="text-center">
+                          <div className="text-3xl font-bold text-blue-600">{projectVisitedLinks.links_count}</div>
+                          <div className="text-sm text-gray-500">Total Links Processed</div>
+                        </div>
+                      </Card>
+                      <Card>
+                        <div className="text-center">
+                          <div className="text-3xl font-bold text-green-600">{projectVisitedLinks.links_scraped}</div>
+                          <div className="text-sm text-gray-500">Links Successfully Scraped</div>
+                        </div>
+                      </Card>
+                      <Card>
+                        <div className="text-center">
+                          <div className="text-3xl font-bold text-purple-600">
+                            {projectVisitedLinks.links_with_keywords}
+                          </div>
+                          <div className="text-sm text-gray-500">Links with Keywords</div>
+                        </div>
+                      </Card>
+                    </div>
+                    
+                    {/* Network Statistics Summary */}
+                    <div className="mb-6">
+                      <h3 className="text-lg font-semibold mb-3">Network Performance</h3>
+                      <div className="grid grid-cols-1 md:grid-cols-4 gap-3">
+                        <Card>
+                          <div className="text-center">
+                            <div className="text-2xl font-bold text-indigo-600">
+                              {projectVisitedLinks.network_stats?.avg_load_time_ms ? 
+                                `${Math.round(projectVisitedLinks.network_stats.avg_load_time_ms)} ms` : 'N/A'}
+                            </div>
+                            <div className="text-sm text-gray-500">Avg Load Time</div>
+                          </div>
+                        </Card>
+                        <Card>
+                          <div className="text-center">
+                            <div className="text-2xl font-bold text-yellow-600">
+                              {projectVisitedLinks.network_stats?.avg_size_kb ? 
+                                `${Math.round(projectVisitedLinks.network_stats.avg_size_kb)} KB` : 'N/A'}
+                            </div>
+                            <div className="text-sm text-gray-500">Avg Page Size</div>
+                          </div>
+                        </Card>
+                        <Card>
+                          <div className="text-center">
+                            <div className="text-2xl font-bold text-red-600">
+                              {projectVisitedLinks.network_stats?.total_errors || 0}
+                            </div>
+                            <div className="text-sm text-gray-500">Network Errors</div>
+                          </div>
+                        </Card>
+                        <Card>
+                          <div className="text-center">
+                            <div className="text-2xl font-bold text-emerald-600">
+                              {projectVisitedLinks.network_stats?.fastest_load_ms ? 
+                                `${Math.round(projectVisitedLinks.network_stats.fastest_load_ms)} ms` : 'N/A'}
+                            </div>
+                            <div className="text-sm text-gray-500">Fastest Response</div>
+                          </div>
+                        </Card>
+                      </div>
+                    </div>
+                    
+                    <div className="overflow-x-auto">
+                      <table className="w-full text-sm text-left text-gray-500">
+                        <thead className="text-xs text-gray-700 uppercase bg-gray-50">
+                          <tr>
+                            <th scope="col" className="px-4 py-3">Link Text</th>
+                            <th scope="col" className="px-4 py-3">URL</th>
+                            <th scope="col" className="px-4 py-3">Status</th>
+                            <th scope="col" className="px-4 py-3">Content</th>
+                            <th scope="col" className="px-4 py-3">Product Info</th>
+                            <th scope="col" className="px-4 py-3">Network</th>
+                            <th scope="col" className="px-4 py-3">Source</th>
+                            <th scope="col" className="px-4 py-3">Actions</th>
+                          </tr>
+                        </thead>
+                        <tbody>
+                          {projectVisitedLinks.links.map((link, index) => (
+                            <tr key={index} className={`bg-white border-b hover:bg-gray-50 ${link.has_keyword ? 'bg-green-50' : ''}`}>
+                              <td className="px-4 py-3 font-medium">
+                                {link.text || "[No text]"}
+                              </td>
+                              <td className="px-4 py-3">
+                                <a 
+                                  href={link.url} 
+                                  target="_blank" 
+                                  rel="noopener noreferrer" 
+                                  className="text-blue-600 hover:underline flex items-center"
+                                >
+                                  <span className="truncate max-w-xs inline-block">{link.url}</span>
+                                  <HiExternalLink className="ml-1 flex-shrink-0" />
+                                </a>
+                              </td>
+                              <td className="px-4 py-3">
+                                {link.scraped ? (
+                                  <span className="inline-flex items-center px-2 py-1 text-xs font-medium rounded-full bg-green-100 text-green-800">
+                                    <span className="w-2 h-2 mr-1 rounded-full bg-green-500"></span>
+                                    Scraped
+                                  </span>
+                                ) : (
+                                  <span className="inline-flex items-center px-2 py-1 text-xs font-medium rounded-full bg-red-100 text-red-800">
+                                    <span className="w-2 h-2 mr-1 rounded-full bg-red-500"></span>
+                                    Failed
+                                  </span>
+                                )}
+                              </td>
+                              <td className="px-4 py-3">
+                                {link.content_summary ? (
+                                  <div className="text-xs space-y-1">
+                                    <div>
+                                      {link.content_summary.text_elements} texts, {link.content_summary.images} images
+                                    </div>
+                                    {link.content_summary.new_links_found && (
+                                      <div>
+                                        <Badge color="indigo">{link.content_summary.new_links_found} new links found</Badge>
+                                      </div>
+                                    )}
+                                  </div>
+                                ) : link.error ? (
+                                  <span className="text-xs text-red-600">{link.error}</span>
+                                ) : (
+                                  <span className="text-gray-400">No data</span>
+                                )}
+                              </td>
+                              <td className="px-4 py-3">
+                                {link.product_info && Object.keys(link.product_info).length > 0 ? (
+                                  <div className="text-xs space-y-1">
+                                    {link.product_info.name && (
+                                      <div className="font-medium">{link.product_info.name}</div>
+                                    )}
+                                    {link.product_info.price && (
+                                      <div className="font-bold text-green-700">
+                                        {link.product_info.price} {link.product_info.currency}
+                                      </div>
+                                    )}
+                                    {link.product_info.brand && (
+                                      <div>Brand: {link.product_info.brand}</div>
+                                    )}
+                                  </div>
+                                ) : (
+                                  <span className="text-gray-400">No product data</span>
+                                )}
+                              </td>
+                              <td className="px-4 py-3">
+                                {link.content_summary ? (
+                                  <div className="text-xs space-y-1">
+                                    <div>{Math.round(link.content_summary.size_bytes/1024)} KB</div>
+                                    {link.content_summary.load_time_ms !== undefined && (
+                                      <div>
+                                        {link.content_summary.load_time_ms} ms
+                                        {link.content_summary.load_time_ms > 1000 ? (
+                                          <Badge color="red" className="ml-1">Slow</Badge>
+                                        ) : link.content_summary.load_time_ms < 300 ? (
+                                          <Badge color="green" className="ml-1">Fast</Badge>
+                                        ) : (
+                                          <Badge color="yellow" className="ml-1">Medium</Badge>
+                                        )}
+                                      </div>
+                                    )}
+                                  </div>
+                                ) : (
+                                  <span className="text-gray-400">N/A</span>
+                                )}
+                              </td>
+                              <td className="px-4 py-3 text-xs">
+                                {link.source_page ? (
+                                  <a 
+                                    href={link.source_page} 
+                                    target="_blank" 
+                                    rel="noopener noreferrer" 
+                                    className="text-blue-600 hover:underline"
+                                  >
+                                    {new URL(link.source_page).pathname}
+                                  </a>
+                                ) : (
+                                  <span className="text-gray-400">Unknown</span>
+                                )}
+                              </td>
+                              <td className="px-4 py-3">
+                                <Button size="xs" color="light">
+                                  Details
+                                </Button>
+                              </td>
+                            </tr>
+                          ))}
+                        </tbody>
+                      </table>
+                    </div>
+                  </>
+                )}
               </Card>
             </div>
           )}

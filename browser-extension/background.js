@@ -181,30 +181,122 @@ async function handleStartScraping(config) {
     
     console.log("User ID being sent:", userInfo?.userId);
     
-    // Send the data to the backend API
-    const response = await fetch('http://localhost:8000/dynamic_scrape', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${token}`
-      },
-      body: JSON.stringify(fullConfig)
-    });
-    
-    if (!response.ok) {
-      const errorData = await response.json();
-      throw new Error(errorData.detail || 'Failed to start scraping');
+    // Check if we have extracted data directly from the content script
+    if (config.extractedData && config.extractedData.length > 0) {
+      // Create a new extension project
+      const projectId = generateProjectId();
+      
+      // Extract page title from HTML if available
+      let pageTitle = config.url;
+      try {
+        const titleMatch = config.pageHTML.match(/<title[^>]*>([^<]+)<\/title>/i);
+        if (titleMatch && titleMatch[1]) {
+          pageTitle = titleMatch[1];
+        }
+      } catch (error) {
+        console.warn("Error extracting page title:", error);
+      }
+      
+      // Create project data
+      const projectData = {
+        project_id: projectId,
+        user_id: userInfo?.userId || "",
+        user_email: userInfo?.userEmail || "",
+        url: config.url,
+        name: `Extraction from ${pageTitle}`,
+        description: `Data extracted from ${config.url} via browser extension`,
+        card_selector: config.cardSelector,
+        pagination_selector: config.paginationSelector,
+        created_at: new Date().toISOString(),
+        status: "in_progress"
+      };
+      
+      // Create the project
+      const projectResponse = await fetch('http://localhost:8000/api/extension-projects', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`
+        },
+        body: JSON.stringify(projectData)
+      });
+      
+      if (!projectResponse.ok) {
+        const errorData = await projectResponse.json();
+        throw new Error(errorData.detail || 'Failed to create extension project');
+      }
+      
+      // Process the extracted data
+      const processedData = config.extractedData.map((item, index) => ({
+        text: item.text,
+        html: item.html,
+        links: item.links || [],
+        images: item.images || [],
+        url: config.url,
+        page_number: 1,
+        title: extractTitleFromHtml(item.html)
+      }));
+      
+      // Send the extracted data
+      const dataResponse = await fetch(`http://localhost:8000/api/extension-projects/${projectId}/data`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`
+        },
+        body: JSON.stringify(processedData)
+      });
+      
+      if (!dataResponse.ok) {
+        const errorData = await dataResponse.json();
+        throw new Error(errorData.detail || 'Failed to store extracted data');
+      }
+      
+      // Mark project as completed
+      const statusResponse = await fetch(`http://localhost:8000/api/extension-projects/${projectId}/status`, {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`
+        },
+        body: JSON.stringify({
+          status: "completed",
+          pages_scraped: 1
+        })
+      });
+      
+      // Open a new tab to show the project
+      chrome.tabs.create({
+        url: `http://localhost:5173/extension-project/${projectId}`
+      });
+      
+      return { success: true, data: { project_id: projectId } };
+    } else {
+      // For dynamic scraping through the backend
+      const response = await fetch('http://localhost:8000/dynamic_scrape', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`
+        },
+        body: JSON.stringify(fullConfig)
+      });
+      
+      if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(errorData.detail || 'Failed to start scraping');
+      }
+      
+      const result = await response.json();
+      console.log("Scraping started successfully:", result);
+      
+      // Open a new tab to show the dashboard with the new scraping job
+      chrome.tabs.create({
+        url: `http://localhost:5173/extension-project/${result.scrape_id || result.project_id}`
+      });
+      
+      return { success: true, data: result };
     }
-    
-    const result = await response.json();
-    console.log("Scraping started successfully:", result);
-    
-    // Open a new tab to show the dashboard with the new scraping job
-    chrome.tabs.create({
-      url: `http://localhost:5173/dashboard?scrape=${result.scrape_id || result.project_id}`
-    });
-    
-    return { success: true, data: result };
   } catch (error) {
     console.error("Error in handleStartScraping:", error);
     return { success: false, error: error.message };
@@ -231,6 +323,38 @@ function getTokenFromCookies() {
       }
     });
   });
+}
+
+// Helper function to extract title from HTML
+function extractTitleFromHtml(html) {
+  try {
+    // Simple regex to find first heading or strong text
+    const headingMatch = html.match(/<h[1-6][^>]*>([^<]+)<\/h[1-6]>/i);
+    if (headingMatch && headingMatch[1]) {
+      return headingMatch[1].trim();
+    }
+    
+    const strongMatch = html.match(/<strong[^>]*>([^<]+)<\/strong>/i);
+    if (strongMatch && strongMatch[1]) {
+      return strongMatch[1].trim();
+    }
+    
+    // Fallback to first text node
+    const textMatch = html.replace(/<[^>]+>/g, ' ')
+      .replace(/\s+/g, ' ')
+      .trim()
+      .substring(0, 100);
+      
+    return textMatch || "Extracted Content";
+  } catch (error) {
+    console.warn("Error extracting title:", error);
+    return "Extracted Content";
+  }
+}
+
+// Generate a unique project ID
+function generateProjectId() {
+  return 'ext_' + Date.now().toString(36) + Math.random().toString(36).substr(2, 5);
 }
 
 // Listen for installation or update events

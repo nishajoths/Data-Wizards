@@ -20,6 +20,7 @@ import requests
 from bs4 import BeautifulSoup
 from urllib.parse import urlparse
 from pymongo import MongoClient
+from typing import Optional, List
 
 client = AsyncIOMotorClient("mongodb://localhost:27017")
 db = client.hackathon
@@ -48,8 +49,9 @@ async def add_project_with_scraping(
     user_email: str, 
     url: str, 
     ws_manager: ConnectionManager = None,
-    scrape_mode: str = "limited",
-    pages_limit: int = 5,
+    scrape_mode: str = "all",
+    pages_limit: Optional[int] = None,  # Allow dynamic page limit
+    depth_limit: int = 3,  # Allow user to specify depth
     client_id: str = None,
     search_keywords: list = None,
     include_meta: bool = True
@@ -63,14 +65,8 @@ async def add_project_with_scraping(
         
         # Validate scrape_mode
         if scrape_mode not in ["all", "limited"]:
-            scrape_mode = "limited"  # Default to limited if invalid value
+            scrape_mode = "all"  # Default to all if invalid value
             
-        # Validate pages_limit
-        if pages_limit < 1:
-            pages_limit = 5  # Set a reasonable default
-        elif scrape_mode == "limited" and pages_limit > 100:
-            pages_limit = 100  # Cap at 100 pages for limited mode to prevent excessive scraping
-        
         # Initialize variables to track processing status
         processing_status = {
             "robots_status": "not_processed",
@@ -82,10 +78,14 @@ async def add_project_with_scraping(
             "start_time": datetime.datetime.utcnow().isoformat(),
             "end_time": None,
             "scrape_mode": scrape_mode,
-            "pages_limit": pages_limit,
+            "pages_limit": pages_limit,  # Use dynamic limit
             "search_keywords": search_keywords or [],
             "include_meta": include_meta,
-            "keyword_matches": {}  # Add a place to store keyword matches
+            "keyword_matches": {},  # Add a place to store keyword matches
+            "extracted_links": {},  # Add a place to store extracted links
+            "visited_links": {},    # Track links that were visited and processed
+            "links_limit": 10,      # Default limit for number of links to visit
+            "link_depth": depth_limit  # Use dynamic depth
         }
         
         # Create project first to get project ID
@@ -160,6 +160,7 @@ async def add_project_with_scraping(
                 user_email,
                 scrape_mode,
                 pages_limit,
+                depth_limit,  # Pass depth limit
                 search_keywords,
                 include_meta
             )
@@ -222,7 +223,7 @@ async def consume_messages(client_id, ws_manager):
 def check_page_for_keywords(url, keywords, include_meta=True):
     """
     Check if a page contains any of the specified keywords.
-    Returns (contains_keywords, matching_keywords, meta_info, contexts)
+    Returns (contains_keywords, matching_keywords, meta_info, contexts, extracted_links)
     """
     try:
         # Use a proper user agent to avoid being blocked
@@ -308,13 +309,45 @@ def check_page_for_keywords(url, keywords, include_meta=True):
                     else:
                         keyword_contexts[keyword] = "Found in meta information"
         
-        print(f"Keywords check for {url}: found {len(matching_keywords)} matches")
-        return len(matching_keywords) > 0, matching_keywords, meta_info, keyword_contexts
+        # Extract all links from the page
+        extracted_links = []
+        for a_tag in soup.find_all('a', href=True):
+            href = a_tag['href']
+            link_text = a_tag.get_text().strip()
+            
+            # Make absolute URL
+            try:
+                from urllib.parse import urljoin
+                absolute_url = urljoin(url, href)
+                
+                # Check if this link contains any keywords
+                link_has_keyword = False
+                matching_link_keywords = []
+                if keywords:
+                    link_text_lower = link_text.lower()
+                    for keyword in keywords:
+                        if keyword.lower() in link_text_lower:
+                            link_has_keyword = True
+                            matching_link_keywords.append(keyword)
+                
+                # Only include links with reasonable text length and that aren't just "#"
+                if len(link_text) > 0 and not href.startswith('#'):
+                    extracted_links.append({
+                        'url': absolute_url,
+                        'text': link_text[:100],  # Limit text length
+                        'has_keyword': link_has_keyword,
+                        'matching_keywords': matching_link_keywords
+                    })
+            except Exception as e:
+                print(f"Error processing link {href}: {e}")
+        
+        print(f"Keywords check for {url}: found {len(matching_keywords)} matches and extracted {len(extracted_links)} links")
+        return len(matching_keywords) > 0, matching_keywords, meta_info, keyword_contexts, extracted_links
         
     except Exception as e:
         print(f"Error checking keywords in {url}: {e}")
         print(traceback.format_exc())
-        return False, [], {}, {}
+        return False, [], {}, {}, []
 
 def send_log(client_id, log_type, message):
     """Send a log message to the client via the message queue"""
@@ -337,6 +370,142 @@ def send_log(client_id, log_type, message):
     else:
         print(f"No message queue for client {client_id}, log message not sent: {message}")
 
+def process_extracted_links(extracted_links, client_id, project_id, collection, processing_status, search_keywords=None, include_meta=True, depth=3):
+    """
+    Process the extracted links by visiting them and extracting content recursively up to a specified depth.
+    """
+    visited_links = processing_status.get("visited_links", {})
+    visited_urls = set(visited_links.keys())  # Track URLs we've already visited to avoid repetition
+    links_to_visit = list(extracted_links.values())
+    
+    # Network performance statistics
+    network_stats = processing_status.get("network_stats", {
+        "total_requests": 0,
+        "successful_requests": 0,
+        "failed_requests": 0,
+        "total_size_bytes": 0,
+        "total_load_time_ms": 0,
+        "avg_load_time_ms": 0,
+        "avg_size_kb": 0,
+        "fastest_load_ms": float('inf'),
+        "slowest_load_ms": 0,
+        "status_codes": {},
+        "content_types": {},
+        "total_errors": 0
+    })
+
+    def scrape_links(links, current_depth):
+        if current_depth > depth:
+            return
+
+        for link in links:
+            url = link['url']
+            if url in visited_urls:
+                send_log(client_id, "info", f"Skipping already visited link: {url}")
+                continue
+
+            try:
+                send_log(client_id, "info", f"Scraping link at depth {current_depth}: {url}")
+                network_stats["total_requests"] += 1
+
+                # Scrape the link
+                scraped_data = scrape_website(url, extract_product_info=True)
+                visited_urls.add(url)
+
+                # Update network stats
+                if 'network_metrics' in scraped_data:
+                    metrics = scraped_data['network_metrics']
+                    network_stats["successful_requests"] += 1
+                    network_stats["total_size_bytes"] += metrics.get('content_size_bytes', 0)
+                    network_stats["total_load_time_ms"] += metrics.get('duration_ms', 0)
+                    network_stats["fastest_load_ms"] = min(network_stats["fastest_load_ms"], metrics.get('duration_ms', float('inf')))
+                    network_stats["slowest_load_ms"] = max(network_stats["slowest_load_ms"], metrics.get('duration_ms', 0))
+                    status_code = str(metrics.get('status_code', 'unknown'))
+                    network_stats["status_codes"][status_code] = network_stats["status_codes"].get(status_code, 0) + 1
+
+                # Store scraped data
+                store_in_mongodb(scraped_data)
+
+                # Add to visited links
+                visited_links[url] = {
+                    "url": url,
+                    "scraped": True,
+                    "scraped_at": datetime.datetime.utcnow().isoformat(),
+                    "content_summary": {
+                        "text_elements": len(scraped_data['content'].get('text_content', [])),
+                        "images": len(scraped_data['content'].get('images', [])),
+                        "size_bytes": scraped_data['network_metrics'].get('content_size_bytes', 0),
+                        "load_time_ms": scraped_data['network_metrics'].get('duration_ms', 0),
+                    },
+                    "product_info": scraped_data.get('product_info', {}),
+                }
+
+                # Recursively scrape new links
+                if current_depth < depth and scraped_data.get('extracted_links'):
+                    new_links = [link for link in scraped_data['extracted_links'] if link['url'] not in visited_urls]
+                    scrape_links(new_links, current_depth + 1)
+
+            except Exception as e:
+                network_stats["failed_requests"] += 1
+                network_stats["total_errors"] += 1
+                send_log(client_id, "error", f"Error scraping link {url}: {str(e)}")
+                visited_links[url] = {"url": url, "scraped": False, "error": str(e)}
+
+    # Start scraping links
+    scrape_links(links_to_visit, current_depth=1)
+
+    # Update network stats
+    if network_stats["successful_requests"] > 0:
+        network_stats["avg_load_time_ms"] = network_stats["total_load_time_ms"] / network_stats["successful_requests"]
+        network_stats["avg_size_kb"] = (network_stats["total_size_bytes"] / network_stats["successful_requests"]) / 1024
+    if network_stats["fastest_load_ms"] == float('inf'):
+        network_stats["fastest_load_ms"] = 0
+
+    # Update project with visited links and network stats
+    update_project_partial_sync(
+        collection,
+        project_id,
+        {
+            "processing_status.visited_links": visited_links,
+            "processing_status.network_stats": network_stats
+        }
+    )
+
+    return visited_links
+
+def is_invalid_url(url):
+    """Check if a URL is invalid or non-navigational"""
+    if not url or not isinstance(url, str):
+        return True
+        
+    invalid_patterns = [
+        r'^javascript:',   # JavaScript links
+        r'^mailto:',       # Email links
+        r'^tel:',          # Phone links
+        r'^#',             # Anchor links
+        r'^data:',         # Data URLs
+        r'^about:',        # About URLs
+        r'^file:'          # File URLs
+    ]
+    
+    for pattern in invalid_patterns:
+        if re.match(pattern, url):
+            return True
+            
+    # Check URL length
+    if len(url) > 2000:
+        return True
+        
+    try:
+        # Check if the URL has a valid scheme
+        parsed = urlparse(url)
+        if not parsed.scheme or not parsed.netloc:
+            return True
+            
+        return False
+    except:
+        return True
+
 def run_extraction_thread(
     url, 
     project_id, 
@@ -344,6 +513,7 @@ def run_extraction_thread(
     user_email,
     scrape_mode="limited",
     pages_limit=5,
+    depth_limit=3,
     search_keywords=None,
     include_meta=True
 ):
@@ -373,7 +543,11 @@ def run_extraction_thread(
             "scrape_mode": scrape_mode,
             "pages_limit": pages_limit,
             "search_keywords": search_keywords or [],
-            "include_meta": include_meta
+            "include_meta": include_meta,
+            "extracted_links": {},  # Add a place to store extracted links
+            "visited_links": {},    # Track links that were visited and processed
+            "links_limit": 10,      # Default limit for number of links to visit
+            "link_depth": depth_limit  # Use dynamic depth
         }
         
         # Log start of extraction with search preferences
@@ -435,12 +609,18 @@ def run_extraction_thread(
         keyword_contexts = {}
         pages_with_keywords = 0
         pages_checked = 0
+        all_extracted_links = {}  # To store all unique extracted links
         
         # First, filter the pages by keywords if keywords are provided
         if search_keywords and len(search_keywords) > 0:
             send_log(client_id, "info", f"Filtering pages by keywords: {', '.join(search_keywords)}")
             
-            for i, page_url in enumerate(sitemap_pages[:pages_limit]):
+            # Determine how many pages to check based on the scrape_mode
+            pages_to_check = sitemap_pages if scrape_mode == "all" else sitemap_pages[:pages_limit]
+            
+            send_log(client_id, "info", f"Scrape mode: {scrape_mode}, checking {len(pages_to_check)} pages for keywords")
+            
+            for i, page_url in enumerate(pages_to_check):
                 # Check for interruption
                 if should_interrupt(client_id):
                     send_log(client_id, "warning", f"Filtering interrupted after checking {i} pages")
@@ -449,14 +629,24 @@ def run_extraction_thread(
                 
                 try:
                     pages_checked += 1
-                    send_log(client_id, "info", f"Checking page {pages_checked}/{len(sitemap_pages[:pages_limit])} for keywords: {page_url}")
+                    send_log(client_id, "info", f"Checking page {pages_checked}/{len(pages_to_check)} for keywords: {page_url}")
                     
-                    # Check if page contains keywords
-                    contains_keywords, matches, meta_info, contexts = check_page_for_keywords(
+                    # Check if page contains keywords - now gets links too
+                    contains_keywords, matches, meta_info, contexts, extracted_links = check_page_for_keywords(
                         page_url, 
                         search_keywords, 
                         include_meta
                     )
+                    
+                    # Process all extracted links to avoid duplicates
+                    for link in extracted_links:
+                        link_url = link['url']
+                        # Store only if not already stored or if this one has keywords and the stored one doesn't
+                        if (link_url not in all_extracted_links or 
+                            (link['has_keyword'] and not all_extracted_links[link_url]['has_keyword'])):
+                            all_extracted_links[link_url] = link
+                            # Add source page information
+                            all_extracted_links[link_url]['source_page'] = page_url
                     
                     if contains_keywords:
                         pages_with_keywords += 1
@@ -465,14 +655,20 @@ def run_extraction_thread(
                         keyword_contexts[page_url] = contexts
                         meta_info_extracted[page_url] = meta_info
                         
+                        # Count how many links were found with keywords
+                        links_with_keywords = sum(1 for l in extracted_links if l['has_keyword'])
+                        
                         # Create detailed log message about keyword matches
                         match_details = []
                         for kw in matches:
                             context = contexts.get(kw, "No context available")
                             match_details.append(f"{kw}: {context[:100]}...")
                             
-                        # Send the log message with keyword matches
-                        send_log(client_id, "success", f"Page {page_url} contains keywords: {', '.join(matches)}")
+                        # Send the log message with keyword matches and link counts
+                        send_log(client_id, "success", 
+                            f"Page {page_url} contains keywords: {', '.join(matches)}. "
+                            f"Found {len(extracted_links)} links ({links_with_keywords} with keywords)"
+                        )
                         for detail in match_details:
                             send_log(client_id, "detail", f"Match context: {detail}")
                     else:
@@ -484,6 +680,9 @@ def run_extraction_thread(
                     print(traceback.format_exc())
                     # Include the page anyway to avoid missing potentially important content
                     filtered_pages.append(page_url)
+            
+            # Log how many links were found in total
+            send_log(client_id, "info", f"Extracted a total of {len(all_extracted_links)} unique links from all pages")
             
             # Add a summary of the keyword search
             if pages_with_keywords > 0:
@@ -508,11 +707,24 @@ def run_extraction_thread(
                     }
                 )
             
-            # Store keyword match information in processing status for later retrieval
-            processing_status["keyword_matches"] = keyword_matches
-            processing_status["keyword_contexts"] = keyword_contexts
-            processing_status["pages_with_keywords"] = pages_with_keywords
-            processing_status["pages_checked"] = pages_checked
+            # Store extracted links information in processing status
+            processing_status["extracted_links"] = all_extracted_links
+            
+            # Add tracking of unique URLs
+            unique_domain_count = len(set(urlparse(link_url).netloc for link_url in all_extracted_links))
+            
+            # Update project with link statistics
+            update_project_partial_sync(
+                thread_projects_collection, 
+                project_id, 
+                {
+                    "processing_status.extracted_links": all_extracted_links,
+                    "processing_status.unique_domains": unique_domain_count
+                }
+            )
+            
+            # Log the unique domain count
+            send_log(client_id, "info", f"Found links from {unique_domain_count} unique domains")
             
             # Update the pages to process - if no keywords found, still process some pages
             if len(filtered_pages) > 0:
@@ -520,11 +732,13 @@ def run_extraction_thread(
                 send_log(client_id, "info", "Processing only pages containing keywords")
             else:
                 # If no pages match keywords, still process some pages
-                pages_to_process = sitemap_pages[:min(pages_limit, len(sitemap_pages))]
-                send_log(client_id, "info", "No pages matched keywords, processing a limited set of pages anyway")
+                # Use all pages for "all" mode, or limited pages for "limited" mode
+                pages_to_process = sitemap_pages if scrape_mode == "all" else sitemap_pages[:min(pages_limit, len(sitemap_pages))]
+                send_log(client_id, "info", "No pages matched keywords, processing pages anyway")
         else:
-            # No keywords, process all pages up to the limit
-            pages_to_process = sitemap_pages[:pages_limit]
+            # No keywords, process all pages or up to the limit based on scrape_mode
+            pages_to_process = sitemap_pages if scrape_mode == "all" else sitemap_pages[:pages_limit]
+            send_log(client_id, "info", f"Scrape mode: {scrape_mode}, processing {len(pages_to_process)} pages")
         
         send_log(client_id, "info", f"Starting to scrape {len(pages_to_process)} pages")
         
@@ -586,6 +800,46 @@ def run_extraction_thread(
                 handle_interruption(client_id, loop, project_id, processing_status)
                 return
         
+        # After processing the original pages, now process extracted links if available
+        if all_extracted_links and not should_interrupt(client_id):
+            unique_count = len(all_extracted_links)
+            send_log(client_id, "info", f"Beginning to process extracted links. Found {unique_count} unique links.")
+            
+            # Process the extracted links
+            visited_links = process_extracted_links(
+                all_extracted_links, 
+                client_id, 
+                project_id, 
+                thread_projects_collection,
+                processing_status,
+                search_keywords,
+                include_meta,
+                depth_limit  # Pass depth limit
+            )
+            
+            # Update the project with visited links data and statistics
+            successful_links = sum(1 for link in visited_links.values() if link.get('scraped', False))
+            processing_status["visited_links"] = visited_links
+            processing_status["links_visited_count"] = len(visited_links)
+            processing_status["links_success_count"] = successful_links
+            processing_status["links_failure_count"] = len(visited_links) - successful_links
+            
+            update_project_partial_sync(
+                thread_projects_collection, 
+                project_id, 
+                {
+                    "processing_status.visited_links": visited_links,
+                    "processing_status.links_visited_count": len(visited_links),
+                    "processing_status.links_success_count": successful_links,
+                    "processing_status.links_failure_count": len(visited_links) - successful_links,
+                }
+            )
+            
+            send_log(client_id, "success", 
+                f"Successfully processed {len(visited_links)} extracted links. "
+                f"Success: {successful_links}, Failed: {len(visited_links) - successful_links}"
+            )
+        
         # Update processing status with final counts
         processing_status["pages_scraped"] = len(scraped_pages)
         processing_status["extraction_status"] = STATUS_COMPLETED
@@ -603,13 +857,14 @@ def run_extraction_thread(
             }
         )
         
-        # Final update to project with keyword match information
+        # Final update to project with keyword match and link information
         final_update = {
             "processing_status.keyword_matches": keyword_matches,
             "processing_status.keyword_contexts": keyword_contexts,
             "processing_status.pages_with_keywords": pages_with_keywords,
             "processing_status.pages_checked": pages_checked,
-            "processing_status.keyword_search_performed": search_keywords and len(search_keywords) > 0
+            "processing_status.keyword_search_performed": search_keywords and len(search_keywords) > 0,
+            "processing_status.extracted_links": all_extracted_links
         }
         
         update_project_partial_sync(

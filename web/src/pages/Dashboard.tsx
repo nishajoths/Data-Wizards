@@ -2,7 +2,7 @@ import { useEffect, useState } from "react";
 import { Button, Card, Spinner, Alert } from "flowbite-react";
 import Cookies from 'js-cookie';
 import { Link } from "react-router-dom";
-import { HiPlus, HiExternalLink, HiInformationCircle, HiTrash } from "react-icons/hi";
+import { HiPlus, HiExternalLink, HiInformationCircle, HiTrash, HiViewGrid } from "react-icons/hi";
 import DeleteConfirmationModal from "../components/DeleteConfirmationModal";
 
 interface Project {
@@ -158,12 +158,20 @@ export default function Dashboard() {
             <h1 className="text-3xl font-bold text-gray-900">Dashboard</h1>
             <p className="text-gray-600">Welcome back, {name}</p>
           </div>
-          <Link to="/add-project">
-            <Button color="blue">
-              <HiPlus className="mr-2 h-5 w-5" />
-              Add New Project
-            </Button>
-          </Link>
+          <div className="flex gap-2">
+            <Link to="/extension-projects">
+              <Button color="purple">
+                <HiViewGrid className="mr-2 h-5 w-5" />
+                Extension Projects
+              </Button>
+            </Link>
+            <Link to="/add-project">
+              <Button color="blue">
+                <HiPlus className="mr-2 h-5 w-5" />
+                Add New Project
+              </Button>
+            </Link>
+          </div>
         </div>
         
         {loading ? (

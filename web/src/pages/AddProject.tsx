@@ -143,25 +143,30 @@ export default function AddProject() {
       console.log('Submitting URL:', formattedUrl);
       
       // Include scraping preferences and keywords in the request
+      const payload = {
+        url: formattedUrl,
+        scrape_mode: scrapingPreferences.scrape_mode,
+        pages_limit: scrapingPreferences.scrape_mode === 'all' ? null : scrapingPreferences.pages_limit, // Handle "extract all pages"
+        search_keywords: searchKeywords.length > 0 ? searchKeywords : [], // Send empty array rather than null
+        include_meta: includeMeta,
+      };
+
+      console.log('Payload:', payload);
+
       const response = await fetch('http://localhost:8000/add_project_with_scraping', {
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
           'Authorization': `Bearer ${token}`
         },
-        body: JSON.stringify({ 
-          url: formattedUrl,
-          scrape_mode: scrapingPreferences.scrape_mode,
-          pages_limit: scrapingPreferences.pages_limit,
-          search_keywords: searchKeywords,
-          include_meta: includeMeta
-        }),
+        body: JSON.stringify(payload),
       });
       
       console.log('Response status:', response.status);
       
       if (!response.ok) {
         const errorData = await response.json().catch(() => ({ detail: "Failed to parse error" }));
+        console.error("Error response:", errorData);
         throw new Error(errorData.detail || `Failed to add project (${response.status})`);
       }
       
@@ -181,7 +186,7 @@ export default function AddProject() {
       
     } catch (err) {
       console.error('Error:', err);
-      setError(err instanceof Error ? err.message : 'An error occurred');
+      setError(err instanceof Error ? err.message : JSON.stringify(err)); // Properly stringify error objects
       setProcessingStatus(null);
       setLoading(false);
     }

@@ -140,6 +140,56 @@ async def run_dynamic_scraper(scrape_id, config, user_email):
                     )
                     break
             
+            # After processing all pages and storing in dynamic_scrape_results,
+            # Update the extension project with the final results
+            if config.get('project_type') == 'extension':
+                extension_project = await db.extension_projects.find_one({"project_id": scrape_id})
+                
+                if extension_project:
+                    # Get all results from dynamic_scrape_results
+                    results_cursor = db.dynamic_scrape_results.find({"scrape_id": scrape_id})
+                    all_results = await results_cursor.to_list(length=1000)
+                    
+                    # Process the results into structured card data
+                    structured_cards = []
+                    for result in all_results:
+                        item_data = result.get('data', {})
+                        
+                        # Extract title from HTML if available
+                        title = None
+                        try:
+                            from bs4 import BeautifulSoup
+                            soup = BeautifulSoup(item_data.get('html', ''), 'html.parser')
+                            heading_tags = soup.find_all(['h1', 'h2', 'h3', 'h4', 'h5', 'h6'])
+                            if heading_tags:
+                                title = heading_tags[0].text.strip()
+                        except:
+                            pass
+                        
+                        card_data = {
+                            "title": title,
+                            "text": item_data.get('text', ''),
+                            "html": item_data.get('html', ''),
+                            "links": item_data.get('links', []),
+                            "images": item_data.get('images', []),
+                            "structured_data": item_data.get('structured_data', {})
+                        }
+                        structured_cards.append(card_data)
+                    
+                    # Update the extension project
+                    await db.extension_projects.update_one(
+                        {"project_id": scrape_id},
+                        {"$set": {
+                            "status": "completed",
+                            "cards_extracted": len(structured_cards),
+                            "pages_scraped": pages_scraped,
+                            "extracted_data": structured_cards,
+                            "updated_at": datetime.utcnow().isoformat()
+                        }}
+                    )
+                    
+                    print(f"Updated extension project {scrape_id} with {len(structured_cards)} extracted cards")
+            
             # Update completion status
             completion_status = "completed" if pages_scraped > 0 else "failed"
             await db.dynamic_scrapes.update_one(
@@ -168,6 +218,16 @@ async def run_dynamic_scraper(scrape_id, config, user_email):
                 "error": error_msg
             }}
         )
+        
+        # Update extension project status if applicable
+        if config.get('project_type') == 'extension':
+            await db.extension_projects.update_one(
+                {"project_id": scrape_id},
+                {"$set": {
+                    "status": "failed",
+                    "updated_at": datetime.utcnow().isoformat()
+                }}
+            )
 
 def extract_structured_data(card):
     """Extract any structured data from the card"""
