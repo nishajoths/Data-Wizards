@@ -6,6 +6,7 @@ from bson import ObjectId
 import traceback
 from auth.auth import get_current_user
 import html2text
+from utils.mongodb_utils import serialize_mongo_doc  # Add this import
 
 router = APIRouter()
 
@@ -43,11 +44,8 @@ async def get_extension_projects(current_user = Depends(get_current_user)):
         cursor = db.extension_projects.find({"user_email": current_user["email"]})
         projects = await cursor.to_list(length=100)
         
-        # Convert ObjectId to str for JSON serialization
-        for project in projects:
-            project["_id"] = str(project["_id"])
-        
-        return {"projects": projects}
+        # Use our serialization function for all projects
+        return {"projects": [serialize_mongo_doc(project) for project in projects]}
     except Exception as e:
         print(f"Error getting extension projects: {e}")
         print(traceback.format_exc())
@@ -68,36 +66,37 @@ async def get_extension_project(project_id: str, current_user = Depends(get_curr
         if not project:
             raise HTTPException(status_code=404, detail="Project not found")
         
-        # Convert ObjectId to str
-        project["_id"] = str(project["_id"])
-        
         # Get all extracted data for this project
         extracted_items_cursor = db.extension_extracted_data.find({"project_id": project_id})
         extracted_items = await extracted_items_cursor.to_list(length=1000)
         
+        # Serialize the project
+        serialized_project = serialize_mongo_doc(project)
+        
         # Process and attach extracted items to the project
         if extracted_items:
+            serialized_project["extracted_data"] = []
+            
             for item in extracted_items:
-                if "_id" in item:
-                    item["_id"] = str(item["_id"])
+                serialized_item = serialize_mongo_doc(item)
+                
                 # Extract title from HTML if not already present
-                if not item.get("title"):
+                if not serialized_item.get("title"):
                     try:
-                        # Use simple heuristic to extract title from HTML
                         h = html2text.HTML2Text()
                         h.ignore_links = True
-                        text = h.handle(item["html"])
+                        text = h.handle(serialized_item["html"])
                         lines = text.strip().split('\n')
                         if lines:
-                            item["title"] = lines[0][:100]  # First line, limited to 100 chars
+                            serialized_item["title"] = lines[0][:100]  # First line, limited to 100 chars
                     except:
                         pass
-            
-            project["extracted_data"] = extracted_items
+                
+                serialized_project["extracted_data"].append(serialized_item)
         else:
-            project["extracted_data"] = []
+            serialized_project["extracted_data"] = []
         
-        return project
+        return serialized_project
         
     except HTTPException as he:
         raise he

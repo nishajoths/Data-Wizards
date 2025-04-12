@@ -3,6 +3,7 @@ from typing import List, Dict, Any, Optional
 from pydantic import BaseModel
 from modules.groq import ScrapingAssistant  # Changed from relative to absolute import
 from auth.auth import get_current_user  # Changed from relative to absolute import
+from utils.mongodb_utils import serialize_mongo_doc
 
 router = APIRouter()
 
@@ -47,7 +48,7 @@ async def compare_items(
         
         return {
             "status": "success",
-            "comparison_result": comparison_result
+            "comparison_result": [serialize_mongo_doc(result) for result in comparison_result]
         }
         
     except Exception as e:

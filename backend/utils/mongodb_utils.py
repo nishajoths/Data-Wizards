@@ -15,6 +15,15 @@ def serialize_mongo_doc(doc):
     if doc is None:
         return None
     
+    if isinstance(doc, ObjectId):
+        return str(doc)
+    
+    if isinstance(doc, datetime):
+        return doc.isoformat()
+    
+    if not isinstance(doc, dict):
+        return doc
+    
     result = {}
     for key, value in doc.items():
         if isinstance(value, ObjectId):
@@ -23,7 +32,7 @@ def serialize_mongo_doc(doc):
             result[key] = value.isoformat()
         elif isinstance(value, list):
             result[key] = [
-                serialize_mongo_doc(item) if isinstance(item, dict) 
+                serialize_mongo_doc(item) if isinstance(item, dict) or isinstance(item, ObjectId)
                 else str(item) if isinstance(item, ObjectId)
                 else item.isoformat() if isinstance(item, datetime)
                 else item

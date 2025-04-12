@@ -2,6 +2,7 @@ from fastapi import FastAPI, HTTPException, Depends, Request, WebSocket, WebSock
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.security import OAuth2PasswordBearer, OAuth2PasswordRequestForm
 from fastapi.responses import JSONResponse, HTMLResponse
+from utils.fastapi_utils import MongoJSONResponse  # Add this import
 from pydantic import BaseModel, EmailStr
 from passlib.context import CryptContext
 from jose import JWTError, jwt
@@ -28,7 +29,7 @@ from scraper.dynamic_scraper import run_dynamic_scraper
 import api.extension_projects
 from api.comparison import router as comparison_router
 
-app = FastAPI()
+app = FastAPI(default_response_class=MongoJSONResponse)
 
 origins = ["http://localhost:5173"]
 app.add_middleware(
