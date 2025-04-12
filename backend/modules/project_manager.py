@@ -21,6 +21,7 @@ import requests
 from bs4 import BeautifulSoup
 from urllib.parse import urlparse
 from pymongo import MongoClient
+from typing import Optional, List
 
 client = AsyncIOMotorClient("mongodb://localhost:27017")
 db = client.hackathon
@@ -47,13 +48,17 @@ STATUS_ERROR = "error"
 
 async def consume_messages(client_id, ws_manager):
     """
-    Asynchronous task to consume messages from the queue and send them via WebSocket
+    Asynchronous task to consume messages from the queue and send them via WebSocket.
+    If WebSocket disconnects, logs will be stored until connection is re-established
+    or until extraction completes.
     """
     if client_id not in message_queues:
         print(f"No message queue found for client {client_id}")
         return
     
     q = message_queues[client_id]
+    msg_buffer = []  # Buffer for messages that couldn't be sent due to disconnection
+    
     try:
         print(f"Starting message consumer for client {client_id}")
         while True:
@@ -61,23 +66,45 @@ async def consume_messages(client_id, ws_manager):
                 # Use a non-blocking get with timeout
                 try:
                     message = q.get(block=False)
-                    await ws_manager.send_personal_json(message, client_id)
-                    q.task_done()
+                    
+                    # Try to send the message via WebSocket
+                    try:
+                        await ws_manager.send_personal_json(message, client_id)
+                        # Message was sent successfully
+                        q.task_done()
+                    except Exception as ws_err:
+                        # WebSocket error - store message in buffer
+                        print(f"WebSocket send error for client {client_id}: {str(ws_err)}")
+                        msg_buffer.append(message)
+                        q.task_done()
+                        
                 except queue.Empty:
-                    # No messages, wait a bit before checking again
+                    # No new messages, try to send any buffered messages if connection is available
+                    if msg_buffer and client_id in ws_manager.active_connections:
+                        try:
+                            # Try to send the oldest buffered message
+                            await ws_manager.send_personal_json(msg_buffer[0], client_id)
+                            # If successful, remove from buffer
+                            msg_buffer.pop(0)
+                            print(f"Sent buffered message to client {client_id}, {len(msg_buffer)} messages remaining")
+                        except Exception as buffer_err:
+                            # Still can't send, wait and try again later
+                            print(f"Failed to send buffered message: {buffer_err}")
+                    
+                    # Wait a bit before checking again
                     await asyncio.sleep(0.1)
                     
-                    # Check if client is still connected and extraction is done
+                    # Check if extraction is done and all messages have been processed
                     if (client_id not in active_extractions or 
                         active_extractions[client_id]["status"] in [STATUS_COMPLETED, STATUS_ERROR, STATUS_INTERRUPTED]):
-                        # If queue is empty and extraction is done, exit the loop
-                        if q.empty():
-                            print(f"Consumer for {client_id} exiting - extraction complete or client disconnected")
+                        # If queue is empty and all buffered messages were sent, exit the loop
+                        if q.empty() and not msg_buffer:
+                            print(f"Consumer for {client_id} exiting - extraction complete and all messages delivered")
                             if client_id in message_queues:
                                 del message_queues[client_id]
-                            if client_id in active_extractions:
-                                del active_extractions[client_id]
                             break
+                        # If messages remain but extraction is complete, try again with backoff
+                        await asyncio.sleep(0.5)
                     continue
                     
             except Exception as e:
@@ -107,7 +134,7 @@ def send_log(client_id, log_type, message):
         print(f"Error adding log to queue for client {client_id}: {str(e)}")
 
 def check_page_for_keywords(url, keywords, include_meta=True):
-    """Check if a page contains any of the specified keywords"""
+    """Check if a page contains any of the specified keywords in all content including cards, text, and images"""
     try:
         # Initialize results
         contains_keywords = False
@@ -128,12 +155,13 @@ def check_page_for_keywords(url, keywords, include_meta=True):
         # Extract text content
         text_content = soup.get_text(separator=' ', strip=True).lower()
         
-        # Check for keywords in content
+        # Check for keywords in main content
         for keyword in keywords:
             keyword_lower = keyword.lower()
             if keyword_lower in text_content:
                 contains_keywords = True
-                found_keywords.append(keyword)
+                if keyword not in found_keywords:  # Avoid duplicates
+                    found_keywords.append(keyword)
                 
                 # Get context for keyword (text around the keyword)
                 start_idx = text_content.find(keyword_lower)
@@ -143,8 +171,50 @@ def check_page_for_keywords(url, keywords, include_meta=True):
                     context = text_content[context_start:context_end].replace('\n', ' ').strip()
                     keyword_contexts[keyword] = f"...{context}..."
         
-        # If include_meta is True, check meta tags as well
-        if include_meta and not contains_keywords:
+        # Check specialized elements (cards, images, etc.) regardless of previous matches
+        
+        # Check image alt texts specifically
+        for img in soup.find_all('img', alt=True):
+            alt_text = img['alt'].lower()
+            for keyword in keywords:
+                keyword_lower = keyword.lower()
+                if keyword_lower in alt_text:
+                    contains_keywords = True
+                    if keyword not in found_keywords:
+                        found_keywords.append(keyword)
+                    keyword_contexts[keyword] = f"Image alt: {img['alt']}"
+        
+        # Check common card elements and other components
+        card_selectors = [
+            '.card', '[class*="card"]', '.product', '.item', 
+            '[class*="product"]', '[class*="item"]', 'article',
+            '.listing', '[class*="listing"]'
+        ]
+        
+        for selector in card_selectors:
+            for card in soup.select(selector):
+                card_text = card.get_text(separator=' ', strip=True).lower()
+                
+                # Check for keywords in card content
+                for keyword in keywords:
+                    keyword_lower = keyword.lower()
+                    if keyword_lower in card_text:
+                        contains_keywords = True
+                        if keyword not in found_keywords:
+                            found_keywords.append(keyword)
+                        
+                        # Try to get more specific context within the card
+                        card_title = card.find(['h1', 'h2', 'h3', 'h4', 'h5', 'h6', '.title', '.heading'])
+                        if card_title:
+                            title_text = card_title.get_text(strip=True)
+                            keyword_contexts[keyword] = f"Card title: {title_text}"
+                        else:
+                            # Just use the card text if no specific element found
+                            context_part = card_text[:100] + "..." if len(card_text) > 100 else card_text
+                            keyword_contexts[keyword] = f"Card content: {context_part}"
+        
+        # If include_meta is True, check meta tags as well (regardless of previous matches)
+        if include_meta:
             # Extract meta title
             title_tag = soup.find('title')
             if title_tag:
@@ -156,7 +226,8 @@ def check_page_for_keywords(url, keywords, include_meta=True):
                     keyword_lower = keyword.lower()
                     if keyword_lower in title_text:
                         contains_keywords = True
-                        found_keywords.append(keyword)
+                        if keyword not in found_keywords:
+                            found_keywords.append(keyword)
                         keyword_contexts[keyword] = f"Title: {title_tag.get_text()}"
             
             # Check meta description and keywords
@@ -171,11 +242,26 @@ def check_page_for_keywords(url, keywords, include_meta=True):
                         keyword_lower = keyword.lower()
                         if keyword_lower in meta_content:
                             contains_keywords = True
-                            found_keywords.append(keyword)
+                            if keyword not in found_keywords:
+                                found_keywords.append(keyword)
                             keyword_contexts[keyword] = f"Meta {meta_name}: {meta_tag.get('content')}"
-        
-        # Remove duplicates from found_keywords
-        found_keywords = list(set(found_keywords))
+            
+            # Also check Open Graph and Twitter card tags
+            for meta_tag in soup.find_all('meta', property=True):
+                meta_prop = meta_tag.get('property', '').lower()
+                meta_content = meta_tag.get('content', '').lower()
+                
+                if 'og:' in meta_prop or 'twitter:' in meta_prop:
+                    prop_type = 'Open Graph' if 'og:' in meta_prop else 'Twitter'
+                    meta_info[meta_prop] = meta_tag.get('content')
+                    
+                    for keyword in keywords:
+                        keyword_lower = keyword.lower()
+                        if keyword_lower in meta_content:
+                            contains_keywords = True
+                            if keyword not in found_keywords:
+                                found_keywords.append(keyword)
+                            keyword_contexts[keyword] = f"{prop_type}: {meta_tag.get('content')}"
         
         return contains_keywords, found_keywords, meta_info, keyword_contexts
     
@@ -187,8 +273,9 @@ async def add_project_with_scraping(
     user_email: str, 
     url: str, 
     ws_manager: ConnectionManager = None,
-    scrape_mode: str = "limited",
-    pages_limit: int = 5,
+    scrape_mode: str = "all",
+    pages_limit: Optional[int] = None,  # Allow dynamic page limit
+    depth_limit: int = 3,  # Allow user to specify depth
     client_id: str = None,
     search_keywords: list = None,
     include_meta: bool = True,
@@ -216,7 +303,7 @@ async def add_project_with_scraping(
             "start_time": datetime.datetime.utcnow().isoformat(),
             "end_time": None,
             "scrape_mode": scrape_mode,
-            "pages_limit": pages_limit,
+            "pages_limit": pages_limit,  # Use dynamic limit
             "search_keywords": search_keywords or [],
             "include_meta": include_meta,
             "keyword_matches": {},  # Add a place to store keyword matches
@@ -296,6 +383,7 @@ async def add_project_with_scraping(
                 user_email,
                 scrape_mode,
                 pages_limit,
+                depth_limit,  # Pass depth limit
                 search_keywords,
                 include_meta,
                 max_depth  # Pass the max depth parameter
@@ -353,6 +441,142 @@ def extract_links_from_html(html_content, base_url):
         print(f"Error extracting links: {e}")
         return []
 
+def process_extracted_links(extracted_links, client_id, project_id, collection, processing_status, search_keywords=None, include_meta=True, depth=3):
+    """
+    Process the extracted links by visiting them and extracting content recursively up to a specified depth.
+    """
+    visited_links = processing_status.get("visited_links", {})
+    visited_urls = set(visited_links.keys())  # Track URLs we've already visited to avoid repetition
+    links_to_visit = list(extracted_links.values())
+    
+    # Network performance statistics
+    network_stats = processing_status.get("network_stats", {
+        "total_requests": 0,
+        "successful_requests": 0,
+        "failed_requests": 0,
+        "total_size_bytes": 0,
+        "total_load_time_ms": 0,
+        "avg_load_time_ms": 0,
+        "avg_size_kb": 0,
+        "fastest_load_ms": float('inf'),
+        "slowest_load_ms": 0,
+        "status_codes": {},
+        "content_types": {},
+        "total_errors": 0
+    })
+
+    def scrape_links(links, current_depth):
+        if current_depth > depth:
+            return
+
+        for link in links:
+            url = link['url']
+            if url in visited_urls:
+                send_log(client_id, "info", f"Skipping already visited link: {url}")
+                continue
+
+            try:
+                send_log(client_id, "info", f"Scraping link at depth {current_depth}: {url}")
+                network_stats["total_requests"] += 1
+
+                # Scrape the link
+                scraped_data = scrape_website(url, extract_product_info=True)
+                visited_urls.add(url)
+
+                # Update network stats
+                if 'network_metrics' in scraped_data:
+                    metrics = scraped_data['network_metrics']
+                    network_stats["successful_requests"] += 1
+                    network_stats["total_size_bytes"] += metrics.get('content_size_bytes', 0)
+                    network_stats["total_load_time_ms"] += metrics.get('duration_ms', 0)
+                    network_stats["fastest_load_ms"] = min(network_stats["fastest_load_ms"], metrics.get('duration_ms', float('inf')))
+                    network_stats["slowest_load_ms"] = max(network_stats["slowest_load_ms"], metrics.get('duration_ms', 0))
+                    status_code = str(metrics.get('status_code', 'unknown'))
+                    network_stats["status_codes"][status_code] = network_stats["status_codes"].get(status_code, 0) + 1
+
+                # Store scraped data
+                store_in_mongodb(scraped_data)
+
+                # Add to visited links
+                visited_links[url] = {
+                    "url": url,
+                    "scraped": True,
+                    "scraped_at": datetime.datetime.utcnow().isoformat(),
+                    "content_summary": {
+                        "text_elements": len(scraped_data['content'].get('text_content', [])),
+                        "images": len(scraped_data['content'].get('images', [])),
+                        "size_bytes": scraped_data['network_metrics'].get('content_size_bytes', 0),
+                        "load_time_ms": scraped_data['network_metrics'].get('duration_ms', 0),
+                    },
+                    "product_info": scraped_data.get('product_info', {}),
+                }
+
+                # Recursively scrape new links
+                if current_depth < depth and scraped_data.get('extracted_links'):
+                    new_links = [link for link in scraped_data['extracted_links'] if link['url'] not in visited_urls]
+                    scrape_links(new_links, current_depth + 1)
+
+            except Exception as e:
+                network_stats["failed_requests"] += 1
+                network_stats["total_errors"] += 1
+                send_log(client_id, "error", f"Error scraping link {url}: {str(e)}")
+                visited_links[url] = {"url": url, "scraped": False, "error": str(e)}
+
+    # Start scraping links
+    scrape_links(links_to_visit, current_depth=1)
+
+    # Update network stats
+    if network_stats["successful_requests"] > 0:
+        network_stats["avg_load_time_ms"] = network_stats["total_load_time_ms"] / network_stats["successful_requests"]
+        network_stats["avg_size_kb"] = (network_stats["total_size_bytes"] / network_stats["successful_requests"]) / 1024
+    if network_stats["fastest_load_ms"] == float('inf'):
+        network_stats["fastest_load_ms"] = 0
+
+    # Update project with visited links and network stats
+    update_project_partial_sync(
+        collection,
+        project_id,
+        {
+            "processing_status.visited_links": visited_links,
+            "processing_status.network_stats": network_stats
+        }
+    )
+
+    return visited_links
+
+def is_invalid_url(url):
+    """Check if a URL is invalid or non-navigational"""
+    if not url or not isinstance(url, str):
+        return True
+        
+    invalid_patterns = [
+        r'^javascript:',   # JavaScript links
+        r'^mailto:',       # Email links
+        r'^tel:',          # Phone links
+        r'^#',             # Anchor links
+        r'^data:',         # Data URLs
+        r'^about:',        # About URLs
+        r'^file:'          # File URLs
+    ]
+    
+    for pattern in invalid_patterns:
+        if re.match(pattern, url):
+            return True
+            
+    # Check URL length
+    if len(url) > 2000:
+        return True
+        
+    try:
+        # Check if the URL has a valid scheme
+        parsed = urlparse(url)
+        if not parsed.scheme or not parsed.netloc:
+            return True
+            
+        return False
+    except:
+        return True
+
 def run_extraction_thread(
     url, 
     project_id, 
@@ -360,12 +584,15 @@ def run_extraction_thread(
     user_email,
     scrape_mode="limited",
     pages_limit=5,
+    depth_limit=3,
     search_keywords=None,
     include_meta=True,
     max_depth=3
 ):
     """
     Run the extraction process in a separate thread with keyword filtering and recursive crawling.
+    This function runs in a background thread and continues processing even if the WebSocket
+    connection is lost or the user navigates away from the page.
     """
     print(f"Starting extraction thread for {url} with client_id {client_id}")
     loop = asyncio.new_event_loop()
@@ -386,8 +613,32 @@ def run_extraction_thread(
     url_queue.put((url, 0))
     base_domain = urlparse(url).netloc
     
+    # Initialize tracking variables
+    pages_checked = 0
+    scraped_pages = []
+    keyword_matches = {}
+    keyword_contexts = {}
+    meta_info_extracted = {}
+    pages_with_keywords = 0
+    all_extracted_links = {}  # Dictionary to track extracted links
+
+    # Update extraction stats to track progress
+    extraction_stats[client_id] = {
+        "start_time": datetime.datetime.utcnow(),
+        "robots_time": 0,
+        "sitemap_time": 0,
+        "scraping_time": 0,
+        "pages_attempted": 0,
+        "pages_successful": 0,
+        "bytes_processed": 0,
+        "total_elements_extracted": 0,
+        "chunks_processed": 0,
+        "last_updated": datetime.datetime.utcnow().isoformat(),
+        "is_background": True
+    }
+    
     try:
-        # Initialize processing status with scraping preferences and keywords
+        # Initialize processing status
         processing_status = {
             "robots_status": "not_processed",
             "sitemap_status": "not_processed",
@@ -401,17 +652,24 @@ def run_extraction_thread(
             "pages_limit": 0,
             "search_keywords": search_keywords or [],
             "include_meta": include_meta,
-            "max_depth": max_depth
+            "max_depth": max_depth,
+            "background_process": True,  # Flag indicating this is a background process
+            "stats_tracking_enabled": True  # Enable detailed statistics tracking
         }
+        
+        # Ensure project has latest status
+        update_project_partial_sync(
+            thread_projects_collection,
+            project_id,
+            {
+                "processing_status": processing_status,
+            }
+        )
         
         # Log start of extraction with search preferences
         send_log(client_id, "info", f"Starting extraction process for {url}")
         send_log(client_id, "info", f"Recursive crawling enabled with max depth {max_depth}")
-        
-        if search_keywords and len(search_keywords) > 0:
-            send_log(client_id, "info", f"Using keyword filter: {', '.join(search_keywords)}")
-            if include_meta:
-                send_log(client_id, "info", "Including meta information in keyword search")
+        send_log(client_id, "info", "Process will continue in the background even if you close this browser window")
         
         # Step 1: Process robots.txt
         send_log(client_id, "info", f"Processing robots.txt for {url}")
@@ -465,19 +723,38 @@ def run_extraction_thread(
         
         send_log(client_id, "info", f"Queued {queue_count} URLs from sitemap for crawling")
         
-        # Step 4: Store keyword matches for each page
-        keyword_matches = {}
-        meta_info_extracted = {}
-        keyword_contexts = {}
-        pages_with_keywords = 0
-        pages_checked = 0
-        scraped_pages = []
-        
-        # Step 5: Process URLs recursively
+        # Step 4: Process URLs recursively
         send_log(client_id, "info", f"Starting recursive crawling from {url_queue.qsize()} initial URLs")
         
         # Process URLs from queue with depth tracking
         while not url_queue.empty():
+            # Update extraction stats periodically
+            extraction_stats[client_id]["pages_attempted"] = pages_checked
+            extraction_stats[client_id]["pages_successful"] = len(scraped_pages)
+            extraction_stats[client_id]["last_updated"] = datetime.datetime.utcnow().isoformat()
+            
+            # Check for interruption before processing each URL
+            if should_interrupt(client_id):
+                send_log(client_id, "warning", "Extraction process interrupted by user")
+                processing_status["extraction_status"] = STATUS_INTERRUPTED
+                processing_status["end_time"] = datetime.datetime.utcnow().isoformat()
+                processing_status["errors"].append("Extraction was interrupted by user request")
+                
+                # Update project with interrupted status
+                update_project_partial_sync(
+                    thread_projects_collection,
+                    project_id,
+                    {
+                        "processing_status.extraction_status": STATUS_INTERRUPTED,
+                        "processing_status.end_time": processing_status["end_time"],
+                        "processing_status.errors": processing_status["errors"]
+                    }
+                )
+                
+                # Send final status message before breaking the loop
+                send_log(client_id, "info", f"Final status: Interrupted after processing {pages_checked} pages")
+                break
+            
             current_url, depth = url_queue.get()
             
             # Skip if already visited
@@ -574,21 +851,30 @@ def run_extraction_thread(
                 print(traceback.format_exc())
                 processing_status["errors"].append(error_msg)
             
-            # Update processing status periodically
+            # Update processing status after each page
             processing_status["pages_found"] = len(visited_urls)
             processing_status["pages_scraped"] = len(scraped_pages)
             
-            # Update the project in MongoDB periodically (every 10 pages)
-            if pages_checked % 10 == 0:
+            # Update the project in MongoDB after each page to ensure progress is saved
+            update_project_partial_sync(
+                thread_projects_collection,
+                project_id,
+                {
+                    "processing_status.pages_found": len(visited_urls),
+                    "processing_status.pages_scraped": len(scraped_pages),
+                    "processing_status.last_updated": datetime.datetime.utcnow().isoformat()
+                }
+            )
+            
+            # Update extracted links in database periodically
+            if pages_checked % 5 == 0 and all_extracted_links:
                 update_project_partial_sync(
                     thread_projects_collection,
                     project_id,
                     {
-                        "processing_status.pages_found": len(visited_urls),
-                        "processing_status.pages_scraped": len(scraped_pages)
+                        "processing_status.extracted_links": all_extracted_links
                     }
                 )
-                send_log(client_id, "info", f"Progress: {len(scraped_pages)} pages scraped, {len(visited_urls)} pages found, {url_queue.qsize()} pages queued")
             
             # Check for interruption after each page
             if should_interrupt(client_id):
@@ -596,47 +882,29 @@ def run_extraction_thread(
                 handle_interruption(client_id, loop, project_id, processing_status)
                 return
         
-        # Update processing status with final counts
+        # Final update to project with complete status
         processing_status["pages_scraped"] = len(scraped_pages)
         processing_status["pages_found"] = len(visited_urls)
         processing_status["extraction_status"] = STATUS_COMPLETED
         processing_status["end_time"] = datetime.datetime.utcnow().isoformat()
         
-        # Update project with scraped pages
         update_project_partial_sync(
             thread_projects_collection,
             project_id,
             {
                 "site_data.scraped_pages": scraped_pages,
                 "site_data.sitemap_pages": list(visited_urls),
-                "processing_status.pages_scraped": len(scraped_pages),
-                "processing_status.pages_found": len(visited_urls),
-                "processing_status.extraction_status": STATUS_COMPLETED,
-                "processing_status.end_time": processing_status["end_time"]
+                "processing_status": processing_status
             }
         )
         
-        # Final update to project with keyword match information
-        if search_keywords and len(search_keywords) > 0:
-            final_update = {
-                "processing_status.keyword_matches": keyword_matches,
-                "processing_status.keyword_contexts": keyword_contexts,
-                "processing_status.pages_with_keywords": pages_with_keywords,
-                "processing_status.pages_checked": pages_checked,
-                "processing_status.keyword_search_performed": True
-            }
-            
-            update_project_partial_sync(
-                thread_projects_collection, 
-                project_id, 
-                final_update
-            )
+        # Update active extractions status
+        if client_id in active_extractions:
+            active_extractions[client_id]["status"] = STATUS_COMPLETED
+            active_extractions[client_id]["last_updated"] = datetime.datetime.utcnow()
         
-        send_log(client_id, "info", "Extraction process completed successfully")
+        send_log(client_id, "success", f"Extraction completed successfully. Results saved to database.")
         send_log(client_id, "success", f"Final results: {len(scraped_pages)} pages scraped, {len(visited_urls)} pages found")
-        
-        if search_keywords and len(search_keywords) > 0:
-            send_log(client_id, "success", f"Found keywords on {pages_with_keywords} out of {pages_checked} pages checked")
         
         # Notify client of completion
         if client_id in message_queues:
@@ -680,10 +948,13 @@ def run_extraction_thread(
         thread_client.close()
         loop.close()
         print(f"Extraction thread for client {client_id} has completed")
+        send_log(client_id, "info", "Background extraction process has ended")
         
-        # Clean up
+        # Update extraction stats one final time - ensure end_time is stored as datetime, not string
         if client_id in extraction_stats:
-            del extraction_stats[client_id]
+            extraction_stats[client_id]["end_time"] = datetime.datetime.utcnow()
+            extraction_stats[client_id]["pages_attempted"] = pages_checked
+            extraction_stats[client_id]["pages_successful"] = len(scraped_pages)
 
 def should_interrupt(client_id):
     """Check if an interruption has been requested for this client"""
@@ -710,15 +981,33 @@ def handle_interruption(client_id, loop, project_id, processing_status):
         thread_db = thread_client.hackathon
         thread_projects_collection = thread_db.projects
         
-        # Update the project with interrupted status
+        # Ensure all extracted data is saved before terminating
+        # Get current extraction data
+        project_data = thread_projects_collection.find_one({"_id": ObjectId(project_id)})
+        
+        # Prepare final update with all collected data
+        final_update = {
+            "processing_status": processing_status,
+            "site_data.scraped_pages": processing_status.get("scraped_pages", []),
+            "site_data.sitemap_pages": list(processing_status.get("visited_urls", [])),
+            "processing_status.extraction_status": STATUS_INTERRUPTED,
+            "processing_status.end_time": processing_status["end_time"],
+            "processing_status.keywords_matched": processing_status.get("keywords_matched", {}),
+            "processing_status.interrupted_at": datetime.datetime.utcnow().isoformat(),
+            "processing_status.pages_with_keywords": processing_status.get("pages_with_keywords", 0),
+        }
+        
+        # Update the project with interrupted status and all collected data
         update_project_partial_sync(
             thread_projects_collection,
             project_id,
-            {"processing_status": processing_status}
+            final_update
         )
         
         # Send log message
         send_log(client_id, "warning", "Extraction interrupted by user request")
+        send_log(client_id, "info", f"Data extraction completed for {processing_status.get('pages_scraped', 0)} pages before interruption")
+        send_log(client_id, "info", "All extracted data has been saved and can be viewed in project details")
         
         # Clean up
         thread_client.close()
@@ -752,15 +1041,40 @@ def interrupt_extraction(client_id):
     return True
 
 def get_extraction_status(client_id):
-    """Get the current status of an extraction process"""
+    """Get the current status of an extraction process with enhanced information"""
     if client_id not in active_extractions:
-        return None
+        return {
+            "status": "unknown",
+            "message": "No extraction found with this ID"
+        }
     
     status = active_extractions[client_id].copy()
     
     # Add additional stats if available
     if client_id in extraction_stats:
         status["stats"] = extraction_stats[client_id]
+        
+        # Calculate runtime
+        if "start_time" in extraction_stats[client_id]:
+            start_time = extraction_stats[client_id]["start_time"]
+            end_time = extraction_stats[client_id].get("end_time")
+            
+            try:
+                # Convert end_time to datetime if it's a string
+                if end_time and isinstance(end_time, str):
+                    end_time = datetime.datetime.fromisoformat(end_time.replace('Z', '+00:00'))
+                
+                if end_time:
+                    runtime = (end_time - start_time).total_seconds()
+                else:
+                    runtime = (datetime.datetime.utcnow() - start_time).total_seconds()
+                    
+                status["stats"]["runtime_seconds"] = runtime
+                status["stats"]["runtime_formatted"] = str(datetime.timedelta(seconds=int(runtime)))
+            except Exception as e:
+                print(f"Error calculating runtime for {client_id}: {e}")
+                status["stats"]["runtime_seconds"] = 0
+                status["stats"]["runtime_formatted"] = "00:00:00"
     
     return status
 

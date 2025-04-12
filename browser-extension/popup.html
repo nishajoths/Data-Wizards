@@ -112,6 +112,97 @@
       background-color: rgba(33, 150, 243, 0.2);
       color: #0277bd;
     }
+    .info-box {
+      background-color: #f0f9ff;
+      border-left: 3px solid #2196f3;
+      padding: 8px 12px;
+      margin: 10px 0;
+      font-size: 12px;
+      color: #0c5460;
+    }
+    .selected {
+      background-color: #4caf50;
+    }
+    ol.instructions {
+      margin: 0;
+      padding-left: 16px;
+    }
+    ol.instructions li {
+      margin-bottom: 5px;
+    }
+    .analyze-button {
+      background-color: #9c27b0;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      margin-bottom: 16px;
+    }
+    .analyze-button:hover {
+      background-color: #7b1fa2;
+    }
+    .result-card {
+      background-color: #f5f5f5;
+      border-radius: 4px;
+      padding: 10px;
+      margin-top: 12px;
+      border-left: 3px solid #4caf50;
+    }
+    .result-card.error {
+      border-left-color: #f44336;
+    }
+    .result-title {
+      font-weight: 600;
+      font-size: 14px;
+      margin-bottom: 6px;
+      color: #333;
+    }
+    .result-count {
+      font-size: 12px;
+      color: #666;
+      margin-bottom: 6px;
+    }
+    .result-selector {
+      font-family: monospace;
+      font-size: 11px;
+      background-color: #e8f5e9;
+      padding: 4px;
+      border-radius: 3px;
+      border: 1px dashed #4caf50;
+      overflow-x: auto;
+      white-space: nowrap;
+      max-width: 100%;
+    }
+    
+    /* Animation for loading spinner */
+    .animate-spin {
+      animation: spin 1s linear infinite;
+    }
+    
+    @keyframes spin {
+      from { transform: rotate(0deg); }
+      to { transform: rotate(360deg); }
+    }
+    
+    /* Toast notification */
+    .toast {
+      position: fixed;
+      bottom: 20px;
+      left: 50%;
+      transform: translateX(-50%);
+      background-color: rgba(0, 0, 0, 0.8);
+      color: white;
+      padding: 8px 16px;
+      border-radius: 4px;
+      font-size: 14px;
+      z-index: 1000;
+      opacity: 0;
+      transition: opacity 0.3s;
+    }
+    
+    .toast.visible {
+      opacity: 1;
+    }
   </style>
 </head>
 <body>
@@ -132,13 +223,37 @@
   
   <p class="description">Select repetitive elements and pagination for data extraction.</p>
   
+  <div class="info-box">
+    <strong>Two ways to scrape:</strong>
+    <ol class="instructions">
+      <li>Click "Analyze Page" to automatically detect patterns</li>
+      <li>Or manually select cards and pagination elements</li>
+      <li>Then click "Extract Data" to begin scraping</li>
+    </ol>
+  </div>
+  
+  <button id="analyze-page" class="analyze-button">
+    <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+      <circle cx="11" cy="11" r="8"></circle>
+      <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+      <path d="M8 11h6"></path>
+      <path d="M11 8v6"></path>
+    </svg>
+    Analyze Page Automatically
+  </button>
+  
+  <!-- Detection results will be shown here -->
+  <div id="detection-results" style="display: none;"></div>
+  
+  <div class="divider"></div>
+  
   <button id="startInspector" class="action-button">
     <div class="icon-text">
       <svg xmlns="http://www.w3.org/2000/svg" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
         <path d="M2 12s3-7 10-7 10 7 10 7-3 7-10 7-10-7-10-7Z"></path>
         <circle cx="12" cy="12" r="3"></circle>
       </svg>
-      Start Inspector
+      Start Manual Selection
     </div>
   </button>
   

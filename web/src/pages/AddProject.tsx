@@ -167,6 +167,7 @@ export default function AddProject() {
       
       if (!response.ok) {
         const errorData = await response.json().catch(() => ({ detail: "Failed to parse error" }));
+        console.error("Error response:", errorData);
         throw new Error(errorData.detail || `Failed to add project (${response.status})`);
       }
       
@@ -186,49 +187,26 @@ export default function AddProject() {
       
     } catch (err) {
       console.error('Error:', err);
-      setError(err instanceof Error ? err.message : 'An error occurred');
+      setError(err instanceof Error ? err.message : JSON.stringify(err)); // Properly stringify error objects
       setProcessingStatus(null);
       setLoading(false);
     }
   };
 
   const handleExtractionComplete = (data: any) => {
-    // Navigate to the project details page with the completion data
-    navigate(`/project-success`, { 
+    // Log the completion
+    console.log("Extraction completed, data:", data);
+    
+    // Show an alert that we're redirecting
+    setProcessingStatus(`Extraction ${data.processing_status.extraction_status}! Redirecting to project details...`);
+    
+    // Navigate to the project details page directly instead of the success page
+    navigate(`/project/${data.project_id}`, { 
       state: { 
-        projectData: {
-          project_id: data.project_id,
-          processing_status: data.processing_status
-        } 
+        fromExtraction: true,
+        processingStatus: data.processing_status
       }
     });
-  };
-
-  const handleExtractionInterrupt = async () => {
-    if (!clientId || !token) return;
-    
-    try {
-      setError('');
-      
-      const response = await fetch('http://localhost:8000/interrupt_extraction', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          'Authorization': `Bearer ${token}`
-        },
-        body: JSON.stringify({ client_id: clientId }),
-      });
-      
-      if (!response.ok) {
-        const errorData = await response.json().catch(() => ({ detail: "Failed to parse error" }));
-        throw new Error(errorData.detail || `Failed to interrupt extraction (${response.status})`);
-      }
-      
-      setProcessingStatus("Interrupting extraction...");
-    } catch (err) {
-      console.error('Error:', err);
-      setError(err instanceof Error ? err.message : 'An error occurred');
-    }
   };
 
   const handleUrlChange = (e: React.ChangeEvent<HTMLInputElement>) => {
@@ -473,6 +451,11 @@ export default function AddProject() {
                 <p className="font-medium">Project successfully created!</p>
                 <p className="text-sm mt-1">
                   The extraction process is now running in the background. You can see the real-time logs below.
+                  Use the interrupt button to stop the extraction process if needed.
+                </p>
+                <p className="text-sm mt-1 font-medium">
+                  Note: The extraction continues as a background process on the server even if you close this page.
+                  <br/>You'll be automatically redirected to the project details when extraction completes.
                 </p>
               </Alert>
               
@@ -481,9 +464,17 @@ export default function AddProject() {
                 onComplete={handleExtractionComplete}
               />
               
-              <div className="text-center text-sm text-gray-500 mt-4">
-                <p>You can safely close this window, but the extraction will stop showing live updates.</p>
-                <p>You'll be redirected automatically when extraction completes.</p>
+              <div className="text-center text-sm text-gray-500 mt-4 p-3 border border-gray-200 rounded-lg bg-gray-50">
+                <p>The data extraction will continue in the background even if you close this window.</p>
+                <p>You can return to your dashboard and view your projects at any time.</p>
+                <Button 
+                  color="light" 
+                  size="sm"
+                  onClick={() => navigate('/dashboard')}
+                  className="mt-2"
+                >
+                  Back to Dashboard
+                </Button>
               </div>
             </div>
           )}

@@ -1,6 +1,7 @@
 import { useEffect, useState, useRef } from "react";
-import { Card, Badge, Alert, Button } from "flowbite-react";
-import { HiInformationCircle, HiCheckCircle, HiExclamationCircle, HiX, HiPaperClip, HiChevronDown, HiChevronRight } from "react-icons/hi";
+import { Card, Badge, Alert, Button, Spinner } from "flowbite-react";
+import { HiInformationCircle, HiCheckCircle, HiExclamationCircle, HiX, HiPaperClip, HiChevronDown, HiChevronRight, HiStop, HiRefresh } from "react-icons/hi";
+import Cookies from 'js-cookie';
 
 interface LogEntry {
   type: string;
@@ -22,6 +23,12 @@ export default function ExtractionLogs({ clientId, onComplete }: ExtractionLogsP
   const socketRef = useRef<WebSocket | null>(null);
   const logsEndRef = useRef<null | HTMLDivElement>(null);
   const [autoScroll, setAutoScroll] = useState(true);
+  const [interrupting, setInterrupting] = useState(false);
+  const [isBackgroundRunning, setIsBackgroundRunning] = useState(false);
+  const [extractionStatus, setExtractionStatus] = useState<any>(null);
+  const reconnectTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const [redirectCountdown, setRedirectCountdown] = useState<number | null>(null);
+  const reconnectAttempts = useRef(0);
 
   // Toggle log detail visibility
   const toggleDetails = (index: number) => {
@@ -64,6 +71,129 @@ export default function ExtractionLogs({ clientId, onComplete }: ExtractionLogsP
     }
   };
 
+  // Add interrupt extraction function
+  const handleExtractionInterrupt = async () => {
+    if (!clientId) return;
+    
+    try {
+      setInterrupting(true);
+      const token = Cookies.get('token');
+      
+      if (!token) {
+        throw new Error("Authentication token not found");
+      }
+      
+      const response = await fetch('http://localhost:8000/interrupt_extraction', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'Authorization': `Bearer ${token}`
+        },
+        body: JSON.stringify({ client_id: clientId }),
+      });
+      
+      if (!response.ok) {
+        const errorData = await response.json();
+        throw new Error(errorData.detail || "Failed to interrupt extraction");
+      }
+      
+      // Add local log entries about the interruption
+      setLogs(prev => [
+        ...prev, 
+        {
+          type: 'warning',
+          message: 'Interruption requested. The process will stop at the next safe point.',
+          timestamp: new Date().toISOString()
+        },
+        {
+          type: 'info',
+          message: 'Data collected up to this point will be available in the project details.',
+          timestamp: new Date().toISOString()
+        },
+        {
+          type: 'info',
+          message: 'You will be redirected to project details when the interruption is complete.',
+          timestamp: new Date().toISOString()
+        }
+      ]);
+      
+      // Fetch status to see if extraction is now interrupted
+      setTimeout(fetchExtractionStatus, 2000);
+      
+    } catch (err) {
+      setError(`Failed to interrupt: ${err instanceof Error ? err.message : 'Unknown error'}`);
+      console.error('Error interrupting extraction:', err);
+    } finally {
+      setInterrupting(false);
+    }
+  };
+
+  // Add function to fetch extraction status
+  const fetchExtractionStatus = async () => {
+    if (!clientId) return;
+    
+    try {
+      const token = Cookies.get('token');
+      if (!token) return;
+      
+      const response = await fetch(`http://localhost:8000/extraction_status/${clientId}`, {
+        headers: {
+          'Authorization': `Bearer ${token}`
+        }
+      });
+      
+      if (response.ok) {
+        const status = await response.json();
+        setExtractionStatus(status);
+        
+        // Set background running state based on status
+        const isRunning = status.status === "running";
+        setIsBackgroundRunning(isRunning);
+        
+        // If extraction is complete OR interrupted, trigger completion callback
+        if (status.status === "completed" || status.status === "interrupted" || status.status === "error") {
+          if (onComplete && status.project_id) {
+            // Start countdown for redirect
+            setRedirectCountdown(5);
+            
+            // Add appropriate message based on status
+            setLogs(prev => [
+              ...prev,
+              {
+                type: status.status === "interrupted" ? 'warning' : 'success',
+                message: status.status === "interrupted" 
+                  ? `Extraction was interrupted. ${status.stats?.pages_successful || 0} pages were successfully extracted.`
+                  : `Extraction completed successfully with ${status.stats?.pages_successful || 0} pages extracted.`,
+                timestamp: new Date().toISOString()
+              }
+            ]);
+            
+            const countdownInterval = setInterval(() => {
+              setRedirectCountdown(prev => {
+                if (prev === 1) {
+                  clearInterval(countdownInterval);
+                  // Call onComplete with project data
+                  onComplete({
+                    project_id: status.project_id,
+                    processing_status: {
+                      extraction_status: status.status,
+                      pages_found: status.stats?.pages_attempted || 0,
+                      pages_scraped: status.stats?.pages_successful || 0
+                    }
+                  });
+                  return null;
+                }
+                return prev ? prev - 1 : null;
+              });
+            }, 1000);
+          }
+        }
+      }
+    } catch (err) {
+      console.error("Error fetching extraction status:", err);
+    }
+  };
+
   // Scroll to bottom when logs update, if auto-scroll is enabled
   useEffect(() => {
     if (autoScroll) {
@@ -71,7 +201,7 @@ export default function ExtractionLogs({ clientId, onComplete }: ExtractionLogsP
     }
   }, [logs, autoScroll]);
 
-  // Set up WebSocket connection
+  // Enhanced WebSocket connection with better reconnection logic
   useEffect(() => {
     if (!clientId) return;
 
@@ -86,9 +216,10 @@ export default function ExtractionLogs({ clientId, onComplete }: ExtractionLogsP
         socket.onopen = () => {
           console.log('WebSocket connection established');
           setIsConnected(true);
+          reconnectAttempts.current = 0; // Reset reconnect attempts on successful connection
           setLogs(prev => [...prev, {
-            type: 'info',
-            message: 'Connected to server. Waiting for extraction logs...',
+            type: 'success',
+            message: 'Connected to server. Receiving live extraction logs.',
             timestamp: new Date().toISOString()
           }]);
         };
@@ -127,14 +258,34 @@ export default function ExtractionLogs({ clientId, onComplete }: ExtractionLogsP
           console.log('WebSocket connection closed:', event);
           setIsConnected(false);
           
+          // If not a clean close, try to reconnect
           if (!event.wasClean) {
-            setError(`Connection closed unexpectedly (code: ${event.code})`);
-            // Try to reconnect after a delay
-            setTimeout(() => {
+            setError(`Connection lost. Attempting to reconnect... (${reconnectAttempts.current + 1})`);
+            
+            // Increment reconnection attempt counter
+            reconnectAttempts.current += 1;
+            
+            // Add a message about background processing continuing
+            setLogs(prev => [...prev, {
+              type: 'info',
+              message: 'Connection to server lost. Extraction continues in the background.',
+              timestamp: new Date().toISOString()
+            }]);
+            
+            // Fetch status to see if extraction is still running
+            fetchExtractionStatus();
+            
+            // Try to reconnect with exponential backoff
+            const backoffTime = Math.min(2000 * Math.pow(2, reconnectAttempts.current), 30000);
+            
+            reconnectTimerRef.current = setTimeout(() => {
               if (socketRef.current?.readyState !== WebSocket.OPEN) {
                 connectWebSocket();
               }
-            }, 3000);
+            }, backoffTime);
+          } else {
+            // If clean close, check if extraction is complete
+            fetchExtractionStatus();
           }
         };
 
@@ -152,12 +303,24 @@ export default function ExtractionLogs({ clientId, onComplete }: ExtractionLogsP
     };
 
     const socket = connectWebSocket();
+    
+    // Set up periodic status checks (every 5 seconds)
+    const statusInterval = setInterval(fetchExtractionStatus, 5000);
 
     return () => {
-      if (socket && socket.readyState === WebSocket.OPEN) {
+      // Clean up WebSocket
+      if (socketRef.current && socketRef.current.readyState === WebSocket.OPEN) {
         console.log('Closing WebSocket connection');
-        socket.close();
+        socketRef.current.close();
       }
+      
+      // Clear reconnection timer if it exists
+      if (reconnectTimerRef.current) {
+        clearTimeout(reconnectTimerRef.current);
+      }
+      
+      // Clear status interval
+      clearInterval(statusInterval);
     };
   }, [clientId, onComplete]);
 
@@ -171,7 +334,12 @@ export default function ExtractionLogs({ clientId, onComplete }: ExtractionLogsP
     <Card className="overflow-hidden">
       <div className="flex justify-between items-center mb-4">
         <h3 className="text-lg font-bold">Extraction Logs</h3>
-        <div className="flex items-center">
+        <div className="flex items-center gap-2">
+          {isBackgroundRunning && !isConnected && (
+            <Badge color="purple" className="mr-2 animate-pulse">
+              Running in background
+            </Badge>
+          )}
           <Badge color={isConnected ? "success" : "gray"} className="mr-2">
             {isConnected ? "Connected" : "Disconnected"}
           </Badge>
@@ -182,6 +350,29 @@ export default function ExtractionLogs({ clientId, onComplete }: ExtractionLogsP
           >
             {autoScroll ? "Disable Auto-scroll" : "Enable Auto-scroll"}
           </Button>
+          
+          {/* Add refresh button */}
+          <Button
+            size="xs"
+            color="light"
+            onClick={fetchExtractionStatus}
+            title="Refresh status"
+          >
+            <HiRefresh className="w-4 h-4" />
+          </Button>
+          
+          {(isConnected || isBackgroundRunning) && (
+            <Button
+              size="xs"
+              color="failure"
+              onClick={handleExtractionInterrupt}
+              disabled={interrupting}
+              className="flex items-center"
+            >
+              <HiStop className="mr-1" />
+              {interrupting ? "Interrupting..." : "Interrupt Extraction"}
+            </Button>
+          )}
         </div>
       </div>
 
@@ -192,6 +383,43 @@ export default function ExtractionLogs({ clientId, onComplete }: ExtractionLogsP
             <span>{error}</span>
           </div>
         </Alert>
+      )}
+
+      {redirectCountdown !== null && (
+        <Alert color="info" className="mb-4">
+          <div className="flex items-center">
+            <Spinner size="sm" className="mr-2" />
+            <span>Redirecting to project details in {redirectCountdown} seconds...</span>
+          </div>
+        </Alert>
+      )}
+      
+      {extractionStatus && (
+        <div className="bg-blue-50 p-3 rounded-lg mb-4 text-sm">
+          <h4 className="font-medium text-blue-700 mb-2">Extraction Status</h4>
+          <div className="grid grid-cols-2 gap-2">
+            <div>
+              <span className="font-medium">Status:</span> 
+              <Badge 
+                color={
+                  extractionStatus.status === "running" ? "info" :
+                  extractionStatus.status === "completed" ? "success" :
+                  extractionStatus.status === "interrupted" ? "warning" : "failure"
+                }
+                className="ml-2"
+              >
+                {extractionStatus.status}
+              </Badge>
+            </div>
+            {extractionStatus.stats && (
+              <>
+                <div><span className="font-medium">Pages attempted:</span> {extractionStatus.stats.pages_attempted || 0}</div>
+                <div><span className="font-medium">Pages successful:</span> {extractionStatus.stats.pages_successful || 0}</div>
+                <div><span className="font-medium">Started:</span> {new Date(extractionStatus.stats.start_time).toLocaleTimeString()}</div>
+              </>
+            )}
+          </div>
+        </div>
       )}
 
       <div className="flex gap-2 flex-wrap mb-4">
@@ -243,7 +471,6 @@ export default function ExtractionLogs({ clientId, onComplete }: ExtractionLogsP
                       </span>
                     </div>
                     
-                    {/* For logs with details, add expand/collapse button */}
                     {log.details && (
                       <div>
                         <button 

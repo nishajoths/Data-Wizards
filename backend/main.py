@@ -19,11 +19,14 @@ from utils.project_utils import get_complete_project_data
 import traceback
 from utils.websocket_manager import ConnectionManager
 import asyncio
-from typing import Optional
+from typing import Optional, List
 from modules.groq import ScrapingAssistant
 from modules.dynamic_scraper import run_dynamic_scraper  # Add this import
 import aiohttp
 import re
+from scraper.dynamic_scraper import run_dynamic_scraper
+import api.extension_projects
+from api.comparison import router as comparison_router
 
 app = FastAPI()
 
@@ -63,8 +66,8 @@ class Token(BaseModel):
 class ProjectURL(BaseModel):
     url: str
     scrape_mode: str = "limited"  # "all" or "limited"
-    pages_limit: int = 5  # Default to 5 pages
-    search_keywords: list[str] = []  # List of keywords to search for
+    pages_limit: Optional[int] = None  # Changed from int to Optional[int]
+    search_keywords: List[str] = []  # List of keywords to search for
     include_meta: bool = True  # Whether to include meta information in search
     max_depth: int = 3  # Maximum depth for recursive crawling
 
@@ -138,7 +141,13 @@ async def get_current_user(token: str = Depends(oauth2_scheme)):
 
 @app.get("/me")
 async def get_me(user: dict = Depends(get_current_user)):
-    return {"name": user["name"]}
+    # Return complete user information including ID
+    return {
+        "name": user["name"],
+        "email": user["email"],
+        "id": str(user["_id"]),  # Convert ObjectId to string
+        "projects": user.get("projects", [])
+    }
 
 @app.post("/add_project")
 async def add_project(user: dict = Depends(get_current_user), project_data: dict = None):
@@ -516,7 +525,10 @@ async def add_project_with_scraping_route(project: ProjectURL, user: dict = Depe
             include_meta=project.include_meta,
             max_depth=project.max_depth
         )
-        
+        return result
+    except HTTPException as e:
+        # Re-raise HTTP exceptions from the implementation
+        raise e
     except Exception as e:
         print(f"Error checking scraping permissions: {e}")
         print(traceback.format_exc())
@@ -539,10 +551,13 @@ async def dynamic_scrape(config: DynamicScrapeConfig, user: dict = Depends(get_c
         # Generate a unique ID for this scraping job
         scrape_id = str(ObjectId())
         
+        # Ensure project_type is set (default to "extension" if not provided)
+        project_type = config.project_type or "extension"
+        
         # Store the configuration
         scrape_config = {
             "user_email": user["email"],
-            "user_id": str(user["id"]) if "id" in user else None,
+            "user_id": str(user["_id"]), 
             "scrape_id": scrape_id,
             "url": config.url,
             "card_selector": config.cardSelector,
@@ -552,17 +567,49 @@ async def dynamic_scrape(config: DynamicScrapeConfig, user: dict = Depends(get_c
             "created_at": datetime.utcnow().isoformat(),
             "pages_scraped": 0,
             "items_found": 0,
-            "project_type": config.project_type,  # Store project type
+            "project_type": project_type,  # Store project type from request
             "errors": []
         }
         
         # Save to MongoDB
         await db.dynamic_scrapes.insert_one(scrape_config)
         
+        # Create an extension project to store the results
+        if project_type == "extension":
+            # Extract page title from HTML if available
+            try:
+                from bs4 import BeautifulSoup
+                soup = BeautifulSoup(config.pageHTML, 'html.parser')
+                title = soup.title.string if soup.title else config.url
+            except:
+                title = config.url
+                
+            extension_project = {
+                "project_id": scrape_id,
+                "user_id": str(user["_id"]),
+                "user_email": user["email"],
+                "url": config.url,
+                "name": f"Extraction from {title}",
+                "description": f"Data extracted from {config.url} via browser extension",
+                "card_selector": config.cardSelector,
+                "pagination_selector": config.paginationSelector,
+                "created_at": datetime.utcnow().isoformat(),
+                "status": "in_progress",
+                "cards_extracted": 0,
+                "pages_scraped": 0,
+                "extracted_data": []
+            }
+            
+            # Save the extension project
+            await db.extension_projects.insert_one(extension_project)
+        
+        # Log the project type for debugging
+        print(f"Creating dynamic scrape with project_type: {project_type}")
+        
         # Start the scraping process in background
         asyncio.create_task(run_dynamic_scraper(scrape_id, config.dict(), user["email"]))
         
-        return {"message": "Dynamic scraping job started", "scrape_id": scrape_id}
+        return {"message": "Dynamic scraping job started", "scrape_id": scrape_id, "project_type": project_type}
     
     except Exception as e:
         print(f"Error starting dynamic scrape: {e}")
@@ -628,6 +675,107 @@ async def store_extracted_data(data: dict, user: dict = Depends(get_current_user
         print(f"Error storing extracted data: {e}")
         raise HTTPException(status_code=500, detail="Failed to store data")
 
+@app.get("/projects/{project_id}/links")
+async def get_project_links(project_id: str, user: dict = Depends(get_current_user)):
+    """Get links extracted from a project based on keywords"""
+    try:
+        # First, check if we have a valid ObjectId
+        if not ObjectId.is_valid(project_id):
+            raise HTTPException(status_code=400, detail="Invalid project ID format")
+        
+        # Get project data
+        project = await projects_collection.find_one({"_id": ObjectId(project_id), "user_email": user["email"]})
+        
+        if not project:
+            raise HTTPException(status_code=404, detail="Project not found")
+        
+        # Get extracted links from processing status
+        extracted_links = project.get("processing_status", {}).get("extracted_links", {})
+        
+        # Convert dict to list and add helpful metadata
+        links_list = []
+        for url, link_data in extracted_links.items():
+            links_list.append({
+                "url": url,
+                "text": link_data.get("text", ""),
+                "has_keyword": link_data.get("has_keyword", False),
+                "matching_keywords": link_data.get("matching_keywords", []),
+                "source_page": link_data.get("source_page", "")
+            })
+        
+        # Sort links - keyword matches first, then by text
+        links_list.sort(key=lambda x: (not x["has_keyword"], x["text"]))
+        
+        return {
+            "project_id": project_id,
+            "links_count": len(links_list),
+            "links_with_keywords": sum(1 for link in links_list if link["has_keyword"]),
+            "links": links_list
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error fetching project links: {e}")
+        print(traceback.format_exc())
+        raise HTTPException(status_code=500, detail=f"Error fetching links: {str(e)}")
+
+@app.get("/projects/{project_id}/visited_links")
+async def get_project_visited_links(project_id: str, user: dict = Depends(get_current_user)):
+    """Get links that were visited and their extraction results"""
+    try:
+        # First, check if we have a valid ObjectId
+        if not ObjectId.is_valid(project_id):
+            raise HTTPException(status_code=400, detail="Invalid project ID format")
+        
+        # Get project data
+        project = await projects_collection.find_one({"_id": ObjectId(project_id), "user_email": user["email"]})
+        
+        if not project:
+            raise HTTPException(status_code=404, detail="Project not found")
+        
+        # Get visited links from processing status
+        visited_links = project.get("processing_status", {}).get("visited_links", {})
+        
+        # Get network stats from processing status
+        network_stats = project.get("processing_status", {}).get("network_stats", {})
+        
+        # Convert dict to list and add helpful metadata
+        links_list = []
+        for url, link_data in visited_links.items():
+            links_list.append({
+                "url": url,
+                "text": link_data.get("text", ""),
+                "has_keyword": link_data.get("has_keyword", False),
+                "matching_keywords": link_data.get("matching_keywords", []),
+                "source_page": link_data.get("source_page", ""),
+                "scraped": link_data.get("scraped", False),
+                "scraped_at": link_data.get("scraped_at", None),
+                "content_summary": link_data.get("content_summary", None),
+                "error": link_data.get("error", None),
+                "network_metrics": link_data.get("network_metrics", None),  # Include network metrics
+                "product_info": link_data.get("product_info", {})  # Include product info
+            })
+        
+        # Sort links - successful scrapes first, then keyword matches
+        links_list.sort(key=lambda x: (not x["scraped"], not x["has_keyword"]))
+        
+        return {
+            "project_id": project_id,
+            "links_count": len(links_list),
+            "links_scraped": sum(1 for link in links_list if link["scraped"]),
+            "links_with_keywords": sum(1 for link in links_list if link["has_keyword"]),
+            "links": links_list,
+            "network_stats": network_stats  # Include aggregated network stats
+        }
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        print(f"Error fetching project visited links: {e}")
+        print(traceback.format_exc())
+        raise HTTPException(status_code=500, detail=f"Error fetching visited links: {str(e)}")
+
 log_file = "page_sources.json"
 
 class PageSource(BaseModel):
@@ -644,5 +792,11 @@ async def log_page_source(data: PageSource):
     with open(log_file, "a") as f:
         f.write(json.dumps(log_entry) + "\n")
     return {"message": "Page source logged successfully"}
+
+# Add the extension projects router
+app.include_router(api.extension_projects.router, prefix="/api", tags=["extension_projects"])
+
+# Add the comparison router to the app
+app.include_router(comparison_router, prefix="/api", tags=["comparison"])
 
 
