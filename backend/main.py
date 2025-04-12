@@ -21,6 +21,7 @@ from utils.websocket_manager import ConnectionManager
 import asyncio
 from typing import Optional
 from modules.groq import ScrapingAssistant
+from modules.dynamic_scraper import run_dynamic_scraper  # Add this import
 import aiohttp
 import re
 
@@ -65,6 +66,7 @@ class ProjectURL(BaseModel):
     pages_limit: int = 5  # Default to 5 pages
     search_keywords: list[str] = []  # List of keywords to search for
     include_meta: bool = True  # Whether to include meta information in search
+    max_depth: int = 3  # Maximum depth for recursive crawling
 
 class ExtractionInterrupt(BaseModel):
     client_id: str
@@ -502,7 +504,7 @@ async def add_project_with_scraping_route(project: ProjectURL, user: dict = Depe
             "timestamp": datetime.utcnow().isoformat()
         }, client_id)
         
-        # Pass the manager to the function so it can send WebSocket updates
+        # Pass the manager and max_depth to the function
         return await add_project_with_scraping(
             user_email=user["email"], 
             url=url, 
@@ -511,7 +513,8 @@ async def add_project_with_scraping_route(project: ProjectURL, user: dict = Depe
             pages_limit=project.pages_limit,
             client_id=client_id,
             search_keywords=project.search_keywords,
-            include_meta=project.include_meta
+            include_meta=project.include_meta,
+            max_depth=project.max_depth
         )
         
     except Exception as e:
@@ -525,7 +528,8 @@ async def add_project_with_scraping_route(project: ProjectURL, user: dict = Depe
             scrape_mode=project.scrape_mode,
             pages_limit=project.pages_limit,
             search_keywords=project.search_keywords,
-            include_meta=project.include_meta
+            include_meta=project.include_meta,
+            max_depth=project.max_depth
         )
 
 @app.post("/dynamic_scrape")

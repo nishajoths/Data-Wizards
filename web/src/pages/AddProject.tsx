@@ -6,6 +6,12 @@ import { HiGlobe, HiExclamationCircle, HiCheck, HiX, HiSearch, HiPlus, HiTrash }
 import ExtractionLogs from '../components/ExtractionLogs';
 import ScrapingOptions, { ScrapingPreferences } from '../components/ScrapingOptions';
 
+let verificationDetails: any = null;
+
+function setVerificationDetails(data: any) {
+  verificationDetails = data;
+}
+
 export default function AddProject() {
   const [url, setUrl] = useState('');
   const [loading, setLoading] = useState(false);
@@ -15,12 +21,10 @@ export default function AddProject() {
   const [processingStatus, setProcessingStatus] = useState<string | null>(null);
   const [clientId, setClientId] = useState<string | null>(null);
   const [scrapingPreferences, setScrapingPreferences] = useState<ScrapingPreferences>({
-    scrape_mode: 'limited',
-    pages_limit: 5
+    scrape_mode: 'all', // Always set to 'all'
+    pages_limit: 0,     // Set to 0 to indicate no limit
+    max_depth: 3        // Default to 3 levels of depth
   });
-  const [verificationDetails, setVerificationDetails] = useState<any>(null);
-  
-  // New state for keywords search
   const [searchKeyword, setSearchKeyword] = useState('');
   const [searchKeywords, setSearchKeywords] = useState<string[]>([]);
   const [includeMeta, setIncludeMeta] = useState(true);
@@ -142,7 +146,7 @@ export default function AddProject() {
 
       console.log('Submitting URL:', formattedUrl);
       
-      // Include scraping preferences and keywords in the request
+      // Include scraping preferences, keywords, and max_depth in the request
       const response = await fetch('http://localhost:8000/add_project_with_scraping', {
         method: 'POST',
         headers: {
@@ -151,10 +155,11 @@ export default function AddProject() {
         },
         body: JSON.stringify({ 
           url: formattedUrl,
-          scrape_mode: scrapingPreferences.scrape_mode,
-          pages_limit: scrapingPreferences.pages_limit,
+          scrape_mode: 'all',
+          pages_limit: 0,
           search_keywords: searchKeywords,
-          include_meta: includeMeta
+          include_meta: includeMeta,
+          max_depth: scrapingPreferences.max_depth
         }),
       });
       
@@ -237,7 +242,7 @@ export default function AddProject() {
     <div className="min-h-screen flex flex-col bg-gradient-to-r from-blue-50 to-white py-12 px-4 sm:px-6 lg:px-8">
       <div className="max-w-3xl mx-auto w-full">
         <div className="bg-white rounded-xl shadow-lg p-8 border border-blue-100 mb-6">
-          <div className="text-center mb-8">
+          <div className="text-center mb-8"></div>
             <div className="inline-flex items-center justify-center w-16 h-16 rounded-full bg-blue-100 mb-4">
               <HiGlobe className="w-8 h-8 text-blue-600" />
             </div>
@@ -484,6 +489,6 @@ export default function AddProject() {
           )}
         </div>
       </div>
-    </div>
   );
 }
+

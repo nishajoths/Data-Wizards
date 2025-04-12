@@ -10,6 +10,7 @@ import threading
 import asyncio
 import concurrent.futures
 import queue
+from queue import Queue
 import json
 import uuid
 import time
@@ -44,6 +45,144 @@ STATUS_INTERRUPTED = "interrupted"
 STATUS_COMPLETED = "completed"
 STATUS_ERROR = "error"
 
+async def consume_messages(client_id, ws_manager):
+    """
+    Asynchronous task to consume messages from the queue and send them via WebSocket
+    """
+    if client_id not in message_queues:
+        print(f"No message queue found for client {client_id}")
+        return
+    
+    q = message_queues[client_id]
+    try:
+        print(f"Starting message consumer for client {client_id}")
+        while True:
+            try:
+                # Use a non-blocking get with timeout
+                try:
+                    message = q.get(block=False)
+                    await ws_manager.send_personal_json(message, client_id)
+                    q.task_done()
+                except queue.Empty:
+                    # No messages, wait a bit before checking again
+                    await asyncio.sleep(0.1)
+                    
+                    # Check if client is still connected and extraction is done
+                    if (client_id not in active_extractions or 
+                        active_extractions[client_id]["status"] in [STATUS_COMPLETED, STATUS_ERROR, STATUS_INTERRUPTED]):
+                        # If queue is empty and extraction is done, exit the loop
+                        if q.empty():
+                            print(f"Consumer for {client_id} exiting - extraction complete or client disconnected")
+                            if client_id in message_queues:
+                                del message_queues[client_id]
+                            if client_id in active_extractions:
+                                del active_extractions[client_id]
+                            break
+                    continue
+                    
+            except Exception as e:
+                print(f"Error in message consumer for {client_id}: {str(e)}")
+                print(traceback.format_exc())
+                await asyncio.sleep(1)  # Prevent tight loop on error
+    except Exception as e:
+        print(f"Fatal error in consumer for {client_id}: {str(e)}")
+        print(traceback.format_exc())
+    print(f"Message consumer for {client_id} has ended")
+
+def send_log(client_id, log_type, message):
+    """Add a log message to the client's message queue"""
+    if client_id not in message_queues:
+        print(f"No message queue found for client {client_id}")
+        return
+    
+    log_entry = {
+        "type": log_type,
+        "message": message,
+        "timestamp": datetime.datetime.utcnow().isoformat()
+    }
+    
+    try:
+        message_queues[client_id].put(log_entry)
+    except Exception as e:
+        print(f"Error adding log to queue for client {client_id}: {str(e)}")
+
+def check_page_for_keywords(url, keywords, include_meta=True):
+    """Check if a page contains any of the specified keywords"""
+    try:
+        # Initialize results
+        contains_keywords = False
+        found_keywords = []
+        meta_info = {}
+        keyword_contexts = {}
+        
+        # Fetch the page content
+        headers = {
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/96.0.4664.110 Safari/537.36"
+        }
+        response = requests.get(url, headers=headers, timeout=15)
+        response.raise_for_status()
+        
+        # Parse the HTML
+        soup = BeautifulSoup(response.content, 'html.parser')
+        
+        # Extract text content
+        text_content = soup.get_text(separator=' ', strip=True).lower()
+        
+        # Check for keywords in content
+        for keyword in keywords:
+            keyword_lower = keyword.lower()
+            if keyword_lower in text_content:
+                contains_keywords = True
+                found_keywords.append(keyword)
+                
+                # Get context for keyword (text around the keyword)
+                start_idx = text_content.find(keyword_lower)
+                if start_idx != -1:
+                    context_start = max(0, start_idx - 50)
+                    context_end = min(len(text_content), start_idx + len(keyword) + 50)
+                    context = text_content[context_start:context_end].replace('\n', ' ').strip()
+                    keyword_contexts[keyword] = f"...{context}..."
+        
+        # If include_meta is True, check meta tags as well
+        if include_meta and not contains_keywords:
+            # Extract meta title
+            title_tag = soup.find('title')
+            if title_tag:
+                title_text = title_tag.get_text().lower()
+                meta_info['title'] = title_tag.get_text()
+                
+                # Check title for keywords
+                for keyword in keywords:
+                    keyword_lower = keyword.lower()
+                    if keyword_lower in title_text:
+                        contains_keywords = True
+                        found_keywords.append(keyword)
+                        keyword_contexts[keyword] = f"Title: {title_tag.get_text()}"
+            
+            # Check meta description and keywords
+            for meta_tag in soup.find_all('meta'):
+                meta_name = meta_tag.get('name', '').lower()
+                meta_content = meta_tag.get('content', '').lower()
+                
+                if meta_name in ['description', 'keywords'] and meta_content:
+                    meta_info[meta_name] = meta_tag.get('content')
+                    
+                    for keyword in keywords:
+                        keyword_lower = keyword.lower()
+                        if keyword_lower in meta_content:
+                            contains_keywords = True
+                            found_keywords.append(keyword)
+                            keyword_contexts[keyword] = f"Meta {meta_name}: {meta_tag.get('content')}"
+        
+        # Remove duplicates from found_keywords
+        found_keywords = list(set(found_keywords))
+        
+        return contains_keywords, found_keywords, meta_info, keyword_contexts
+    
+    except Exception as e:
+        print(f"Error checking keywords for {url}: {str(e)}")
+        return False, [], {}, {}
+
 async def add_project_with_scraping(
     user_email: str, 
     url: str, 
@@ -52,7 +191,8 @@ async def add_project_with_scraping(
     pages_limit: int = 5,
     client_id: str = None,
     search_keywords: list = None,
-    include_meta: bool = True
+    include_meta: bool = True,
+    max_depth: int = 3  # New parameter to control crawling depth
 ):
     """
     Add a new project with threaded extraction, communicating progress via WebSockets.
@@ -61,15 +201,9 @@ async def add_project_with_scraping(
         if not url:
             raise HTTPException(status_code=400, detail="URL is required")
         
-        # Validate scrape_mode
-        if scrape_mode not in ["all", "limited"]:
-            scrape_mode = "limited"  # Default to limited if invalid value
-            
-        # Validate pages_limit
-        if pages_limit < 1:
-            pages_limit = 5  # Set a reasonable default
-        elif scrape_mode == "limited" and pages_limit > 100:
-            pages_limit = 100  # Cap at 100 pages for limited mode to prevent excessive scraping
+        # Always set scrape_mode to "all" and pages_limit to 0 to indicate no limit
+        scrape_mode = "all"
+        pages_limit = 0
         
         # Initialize variables to track processing status
         processing_status = {
@@ -85,7 +219,9 @@ async def add_project_with_scraping(
             "pages_limit": pages_limit,
             "search_keywords": search_keywords or [],
             "include_meta": include_meta,
-            "keyword_matches": {}  # Add a place to store keyword matches
+            "keyword_matches": {},  # Add a place to store keyword matches
+            "max_depth": max_depth,  # Store the max crawling depth
+            "recursive_crawling": True  # Enable recursive crawling
         }
         
         # Create project first to get project ID
@@ -151,7 +287,7 @@ async def add_project_with_scraping(
                 "message": f"Project created. Starting extraction for {url}"
             }, client_id)
             
-            # Start extraction in a separate thread with scrape preferences and search keywords
+            # Start extraction in a separate thread with scrape preferences, search keywords, and max depth
             thread_pool.submit(
                 run_extraction_thread, 
                 url, 
@@ -161,7 +297,8 @@ async def add_project_with_scraping(
                 scrape_mode,
                 pages_limit,
                 search_keywords,
-                include_meta
+                include_meta,
+                max_depth  # Pass the max depth parameter
             )
         
         return {
@@ -175,167 +312,46 @@ async def add_project_with_scraping(
         print(traceback.format_exc())
         raise HTTPException(status_code=500, detail=f"Internal server error: {str(e)}")
 
-async def consume_messages(client_id, ws_manager):
+def extract_links_from_html(html_content, base_url):
     """
-    Asynchronous task to consume messages from the queue and send them via WebSocket
-    """
-    if client_id not in message_queues:
-        print(f"No message queue found for client {client_id}")
-        return
-    
-    q = message_queues[client_id]
-    try:
-        print(f"Starting message consumer for client {client_id}")
-        while True:
-            try:
-                # Use a non-blocking get with timeout
-                try:
-                    message = q.get(block=False)
-                    await ws_manager.send_personal_json(message, client_id)
-                    q.task_done()
-                except queue.Empty:
-                    # No messages, wait a bit before checking again
-                    await asyncio.sleep(0.1)
-                    
-                    # Check if client is still connected and extraction is done
-                    if (client_id not in active_extractions or 
-                        active_extractions[client_id]["status"] in [STATUS_COMPLETED, STATUS_ERROR, STATUS_INTERRUPTED]):
-                        # If queue is empty and extraction is done, exit the loop
-                        if q.empty():
-                            print(f"Consumer for {client_id} exiting - extraction complete or client disconnected")
-                            if client_id in message_queues:
-                                del message_queues[client_id]
-                            if client_id in active_extractions:
-                                del active_extractions[client_id]
-                            break
-                    continue
-                    
-            except Exception as e:
-                print(f"Error in message consumer for {client_id}: {str(e)}")
-                print(traceback.format_exc())
-                await asyncio.sleep(1)  # Prevent tight loop on error
-    except Exception as e:
-        print(f"Fatal error in consumer for {client_id}: {str(e)}")
-        print(traceback.format_exc())
-    print(f"Message consumer for {client_id} has ended")
-
-def check_page_for_keywords(url, keywords, include_meta=True):
-    """
-    Check if a page contains any of the specified keywords.
-    Returns (contains_keywords, matching_keywords, meta_info, contexts)
+    Extract all links from the HTML content and normalize them
     """
     try:
-        # Use a proper user agent to avoid being blocked
-        headers = {
-            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/96.0.4664.110 Safari/537.36"
-        }
+        soup = BeautifulSoup(html_content, 'html.parser')
+        links = set()
         
-        print(f"Checking URL for keywords: {url}")
-        response = requests.get(url, headers=headers, timeout=15)
-        response.raise_for_status()
+        # Parse base URL for normalization
+        parsed_base = urlparse(base_url)
+        base_domain = parsed_base.netloc
         
-        # Parse the HTML
-        soup = BeautifulSoup(response.text, 'html.parser')
-        
-        # Extract visible text content (lowercase for case-insensitive matching)
-        text_content = soup.get_text().lower()
-        
-        # Extract meta information if requested
-        meta_info = {}
-        if include_meta:
-            # Extract title
-            title_tag = soup.find('title')
-            if title_tag:
-                meta_info['title'] = title_tag.get_text()
+        for a_tag in soup.find_all('a', href=True):
+            href = a_tag['href'].strip()
             
-            # Extract meta description
-            meta_desc = soup.find('meta', attrs={'name': 'description'})
-            if meta_desc and meta_desc.has_attr('content'):
-                meta_info['description'] = meta_desc['content']
-            
-            # Extract meta keywords
-            meta_keywords = soup.find('meta', attrs={'name': 'keywords'})
-            if meta_keywords and meta_keywords.has_attr('content'):
-                meta_info['keywords'] = meta_keywords['content']
-            
-            # Extract OG (Open Graph) tags
-            og_tags = {}
-            for meta in soup.find_all('meta', attrs={'property': re.compile('^og:')}):
-                if meta.has_attr('content'):
-                    og_tags[meta['property']] = meta['content']
-            if og_tags:
-                meta_info['og'] = og_tags
-        
-        # Check keywords in the text content
-        matching_keywords = []
-        keyword_contexts = {}  # Store the context where each keyword appears
-        
-        for keyword in keywords:
-            # Find all occurrences of the keyword in the text content
-            keyword_lower = keyword.lower()
-            if keyword_lower in text_content:
-                matching_keywords.append(keyword)
+            # Skip empty links and javascript links
+            if not href or href.startswith('javascript:') or href == '#':
+                continue
                 
-                # Find context (text surrounding the keyword)
-                start_index = text_content.find(keyword_lower)
-                if start_index != -1:
-                    context_start = max(0, start_index - 50)
-                    context_end = min(len(text_content), start_index + len(keyword) + 50)
-                    context = text_content[context_start:context_end]
-                    keyword_contexts[keyword] = f"...{context}..."
-        
-        # If include_meta is True, also check in meta information
-        if include_meta:
-            meta_text = ' '.join([
-                meta_info.get('title', ''),
-                meta_info.get('description', ''),
-                meta_info.get('keywords', ''),
-                ' '.join([v for k, v in meta_info.get('og', {}).items()])
-            ]).lower()
+            # Normalize URL
+            if href.startswith('/'):
+                # Relative URL
+                scheme = parsed_base.scheme or 'https'
+                href = f"{scheme}://{base_domain}{href}"
+            elif not (href.startswith('http://') or href.startswith('https://')):
+                # Relative URL without leading slash
+                if not base_url.endswith('/'):
+                    href = f"{base_url}/{href}"
+                else:
+                    href = f"{base_url}{href}"
             
-            for keyword in keywords:
-                keyword_lower = keyword.lower()
-                if keyword_lower in meta_text and keyword not in matching_keywords:
-                    matching_keywords.append(keyword)
-                    
-                    # Add context info from meta tags
-                    if keyword_lower in meta_info.get('title', '').lower():
-                        keyword_contexts[keyword] = f"Found in title: {meta_info['title']}"
-                    elif keyword_lower in meta_info.get('description', '').lower():
-                        keyword_contexts[keyword] = f"Found in meta description: {meta_info['description']}"
-                    elif keyword_lower in meta_info.get('keywords', '').lower():
-                        keyword_contexts[keyword] = f"Found in meta keywords: {meta_info['keywords']}"
-                    else:
-                        keyword_contexts[keyword] = "Found in meta information"
-        
-        print(f"Keywords check for {url}: found {len(matching_keywords)} matches")
-        return len(matching_keywords) > 0, matching_keywords, meta_info, keyword_contexts
-        
+            # Only include links from the same domain
+            parsed_href = urlparse(href)
+            if parsed_href.netloc == base_domain or not parsed_href.netloc:
+                links.add(href)
+                
+        return list(links)
     except Exception as e:
-        print(f"Error checking keywords in {url}: {e}")
-        print(traceback.format_exc())
-        return False, [], {}, {}
-
-def send_log(client_id, log_type, message):
-    """Send a log message to the client via the message queue"""
-    if client_id in message_queues:
-        try:
-            # Format timestamp for consistency
-            timestamp = datetime.datetime.utcnow().isoformat()
-            
-            # Debug logging to server console to track progress
-            print(f"LOG [{client_id}] [{log_type}]: {message}")
-            
-            # Add to message queue for websocket transmission
-            message_queues[client_id].put({
-                "type": log_type,
-                "timestamp": timestamp,
-                "message": message
-            })
-        except Exception as e:
-            print(f"Error sending log: {e}")
-    else:
-        print(f"No message queue for client {client_id}, log message not sent: {message}")
+        print(f"Error extracting links: {e}")
+        return []
 
 def run_extraction_thread(
     url, 
@@ -345,10 +361,11 @@ def run_extraction_thread(
     scrape_mode="limited",
     pages_limit=5,
     search_keywords=None,
-    include_meta=True
+    include_meta=True,
+    max_depth=3
 ):
     """
-    Run the extraction process in a separate thread with keyword filtering.
+    Run the extraction process in a separate thread with keyword filtering and recursive crawling.
     """
     print(f"Starting extraction thread for {url} with client_id {client_id}")
     loop = asyncio.new_event_loop()
@@ -358,6 +375,16 @@ def run_extraction_thread(
     thread_client = AsyncIOMotorClient("mongodb://localhost:27017")
     thread_db = thread_client.hackathon
     thread_projects_collection = thread_db.projects
+    
+    # Track visited URLs to avoid duplicates
+    visited_urls = set()
+    # URLs that matched keywords (only if keywords were provided)
+    keyword_matched_urls = set()
+    # Queue for URLs to visit with their depth level
+    url_queue = Queue()
+    # Initial URL with depth 0
+    url_queue.put((url, 0))
+    base_domain = urlparse(url).netloc
     
     try:
         # Initialize processing status with scraping preferences and keywords
@@ -370,14 +397,17 @@ def run_extraction_thread(
             "extraction_status": STATUS_RUNNING,
             "start_time": datetime.datetime.utcnow().isoformat(),
             "end_time": None,
-            "scrape_mode": scrape_mode,
-            "pages_limit": pages_limit,
+            "scrape_mode": "all",
+            "pages_limit": 0,
             "search_keywords": search_keywords or [],
-            "include_meta": include_meta
+            "include_meta": include_meta,
+            "max_depth": max_depth
         }
         
         # Log start of extraction with search preferences
         send_log(client_id, "info", f"Starting extraction process for {url}")
+        send_log(client_id, "info", f"Recursive crawling enabled with max depth {max_depth}")
+        
         if search_keywords and len(search_keywords) > 0:
             send_log(client_id, "info", f"Using keyword filter: {', '.join(search_keywords)}")
             if include_meta:
@@ -395,7 +425,7 @@ def run_extraction_thread(
             else:
                 processing_status["robots_status"] = "failed"
                 processing_status["errors"].append("Failed to process robots.txt")
-                send_log(client_id, "error", f"Failed to process robots.txt")
+                send_log(client_id, "warning", f"Failed to process robots.txt, continuing anyway")
         except Exception as e:
             error_msg = f"Error in robots.txt processing: {str(e)}"
             processing_status["robots_status"] = "error"
@@ -417,177 +447,158 @@ def run_extraction_thread(
             else:
                 processing_status["sitemap_status"] = "no_pages"
                 processing_status["errors"].append("No pages found in sitemap")
-                send_log(client_id, "warning", "No pages found in sitemap")
+                send_log(client_id, "warning", "No pages found in sitemap, starting with the base URL")
         except Exception as e:
             error_msg = f"Error in sitemap processing: {str(e)}"
             processing_status["sitemap_status"] = "error"
             processing_status["errors"].append(error_msg)
             send_log(client_id, "error", error_msg)
+            send_log(client_id, "info", "Continuing with crawling from the base URL")
         
-        # Step 3: Scrape pages - now with keyword filtering
-        scraping_start = time.time()
-        scraped_pages = []
-        filtered_pages = []
+        # Step 3: Queue sitemap pages for crawling
+        send_log(client_id, "info", "Queuing sitemap pages for crawling...")
+        queue_count = 0
+        for page_url in sitemap_pages:
+            if page_url not in visited_urls:
+                url_queue.put((page_url, 0))  # All sitemap pages start at depth 0
+                queue_count += 1
         
-        # Store keyword matches for each page
+        send_log(client_id, "info", f"Queued {queue_count} URLs from sitemap for crawling")
+        
+        # Step 4: Store keyword matches for each page
         keyword_matches = {}
         meta_info_extracted = {}
         keyword_contexts = {}
         pages_with_keywords = 0
         pages_checked = 0
+        scraped_pages = []
         
-        # First, filter the pages by keywords if keywords are provided
-        if search_keywords and len(search_keywords) > 0:
-            send_log(client_id, "info", f"Filtering pages by keywords: {', '.join(search_keywords)}")
+        # Step 5: Process URLs recursively
+        send_log(client_id, "info", f"Starting recursive crawling from {url_queue.qsize()} initial URLs")
+        
+        # Process URLs from queue with depth tracking
+        while not url_queue.empty():
+            current_url, depth = url_queue.get()
             
-            for i, page_url in enumerate(sitemap_pages[:pages_limit]):
-                # Check for interruption
-                if should_interrupt(client_id):
-                    send_log(client_id, "warning", f"Filtering interrupted after checking {i} pages")
-                    handle_interruption(client_id, loop, project_id, processing_status)
-                    return
+            # Skip if already visited
+            if current_url in visited_urls:
+                continue
                 
-                try:
-                    pages_checked += 1
-                    send_log(client_id, "info", f"Checking page {pages_checked}/{len(sitemap_pages[:pages_limit])} for keywords: {page_url}")
-                    
-                    # Check if page contains keywords
+            # Skip if from a different domain
+            url_domain = urlparse(current_url).netloc
+            if url_domain != base_domain:
+                continue
+            
+            # Mark as visited to avoid duplicates
+            visited_urls.add(current_url)
+            pages_checked += 1
+            
+            # Log the current crawling progress
+            send_log(client_id, "info", f"Crawling page {pages_checked} at depth {depth}: {current_url}")
+            
+            try:
+                # Check for keywords if specified
+                should_store = True
+                if search_keywords and len(search_keywords) > 0:
+                    send_log(client_id, "detail", f"Checking page for keywords: {current_url}")
                     contains_keywords, matches, meta_info, contexts = check_page_for_keywords(
-                        page_url, 
+                        current_url, 
                         search_keywords, 
                         include_meta
                     )
                     
                     if contains_keywords:
+                        keyword_matched_urls.add(current_url)
+                        keyword_matches[current_url] = matches
+                        keyword_contexts[current_url] = contexts
+                        meta_info_extracted[current_url] = meta_info
                         pages_with_keywords += 1
-                        filtered_pages.append(page_url)
-                        keyword_matches[page_url] = matches
-                        keyword_contexts[page_url] = contexts
-                        meta_info_extracted[page_url] = meta_info
                         
-                        # Create detailed log message about keyword matches
-                        match_details = []
-                        for kw in matches:
-                            context = contexts.get(kw, "No context available")
-                            match_details.append(f"{kw}: {context[:100]}...")
-                            
-                        # Send the log message with keyword matches
-                        send_log(client_id, "success", f"Page {page_url} contains keywords: {', '.join(matches)}")
-                        for detail in match_details:
-                            send_log(client_id, "detail", f"Match context: {detail}")
+                        # Log matches
+                        send_log(client_id, "success", f"Page contains keywords: {', '.join(matches)}")
+                        for kw, context in contexts.items():
+                            send_log(client_id, "detail", f"Match '{kw}': {context[:100]}...")
                     else:
-                        # Log when no keywords are found as well
-                        send_log(client_id, "warning", f"Page {page_url} does not contain any keywords, skipping")
-                except Exception as e:
-                    send_log(client_id, "error", f"Error checking keywords in {page_url}: {str(e)}")
-                    print(f"Exception during keyword check: {str(e)}")
-                    print(traceback.format_exc())
-                    # Include the page anyway to avoid missing potentially important content
-                    filtered_pages.append(page_url)
+                        # Still crawl but don't store if no keywords match
+                        should_store = False
+                        send_log(client_id, "detail", f"No keywords found on this page")
+                
+                # Scrape the page to extract content and links
+                send_log(client_id, "info", f"Scraping page content: {current_url}")
+                scraped_data = scrape_website(current_url)
+                
+                # Extract links for recursive crawling if not at max depth
+                if depth < max_depth:
+                    # Extract links from the page content
+                    page_content = scraped_data.get('raw_html', '')
+                    
+                    if page_content:
+                        # Find and queue new links
+                        new_links = extract_links_from_html(page_content, current_url)
+                        new_link_count = 0
+                        
+                        for link in new_links:
+                            if link not in visited_urls:
+                                url_queue.put((link, depth + 1))
+                                new_link_count += 1
+                        
+                        send_log(client_id, "detail", f"Found {len(new_links)} links, queued {new_link_count} new ones for depth {depth+1}")
+                    else:
+                        send_log(client_id, "warning", f"No HTML content to extract links from")
+                else:
+                    send_log(client_id, "detail", f"Max depth {max_depth} reached, not extracting further links")
+                
+                # Store the scraped data if needed
+                if should_store:
+                    # Add to the list of scraped pages
+                    scraped_pages.append(current_url)
+                    
+                    # If we have meta information from the keyword search, add it to scraped data
+                    if current_url in meta_info_extracted and meta_info_extracted[current_url]:
+                        scraped_data["meta_info"] = meta_info_extracted[current_url]
+                    
+                    # Store scraped data in MongoDB
+                    store_in_mongodb(scraped_data)
+                    
+                    send_log(client_id, "success", f"Successfully stored page content for {current_url}")
+                    
+                    # Log content stats
+                    text_count = len(scraped_data.get('content', {}).get('text_content', []))
+                    image_count = len(scraped_data.get('content', {}).get('images', []))
+                    send_log(client_id, "detail", f"Extracted {text_count + image_count} elements ({text_count} text, {image_count} images)")
             
-            # Add a summary of the keyword search
-            if pages_with_keywords > 0:
-                send_log(client_id, "info", f"Found {pages_with_keywords} pages containing keywords out of {pages_checked} checked")
-            else:
-                send_log(client_id, "warning", f"No pages containing the specified keywords were found after checking {pages_checked} pages")
-                # Still log the search attempt
-                processing_status["keyword_search_performed"] = True
-                processing_status["keyword_search_results"] = "no_matches"
-                processing_status["pages_checked"] = pages_checked
-                processing_status["search_keywords"] = search_keywords
-                
-                # Update project with search information
-                update_project_partial_sync(
-                    thread_projects_collection, 
-                    project_id, 
-                    {
-                        "processing_status.keyword_search_performed": True,
-                        "processing_status.keyword_search_results": "no_matches",
-                        "processing_status.pages_checked": pages_checked,
-                        "processing_status.search_keywords": search_keywords
-                    }
-                )
-            
-            # Store keyword match information in processing status for later retrieval
-            processing_status["keyword_matches"] = keyword_matches
-            processing_status["keyword_contexts"] = keyword_contexts
-            processing_status["pages_with_keywords"] = pages_with_keywords
-            processing_status["pages_checked"] = pages_checked
-            
-            # Update the pages to process - if no keywords found, still process some pages
-            if len(filtered_pages) > 0:
-                pages_to_process = filtered_pages
-                send_log(client_id, "info", "Processing only pages containing keywords")
-            else:
-                # If no pages match keywords, still process some pages
-                pages_to_process = sitemap_pages[:min(pages_limit, len(sitemap_pages))]
-                send_log(client_id, "info", "No pages matched keywords, processing a limited set of pages anyway")
-        else:
-            # No keywords, process all pages up to the limit
-            pages_to_process = sitemap_pages[:pages_limit]
-        
-        send_log(client_id, "info", f"Starting to scrape {len(pages_to_process)} pages")
-        
-        # Now process the filtered pages
-        for i, page_url in enumerate(pages_to_process):
-            try:
-                send_log(client_id, "info", f"Scraping page {i+1}/{len(pages_to_process)}: {page_url}")
-                
-                # Add keyword match information if available
-                if page_url in keyword_matches:
-                    send_log(client_id, "detail", f"Keyword matches: {', '.join(keyword_matches[page_url])}")
-                
-                # Add meta information if available
-                if page_url in meta_info_extracted and meta_info_extracted[page_url]:
-                    meta = meta_info_extracted[page_url]
-                    if 'title' in meta:
-                        send_log(client_id, "detail", f"Meta title: {meta.get('title', 'N/A')}")
-                    if 'description' in meta:
-                        send_log(client_id, "detail", f"Meta description: {meta.get('description', 'N/A')}")
-                
-                # Continue with regular scraping
-                scrape_start_time = time.time()
-                scraped_data = scrape_website(page_url)
-                
-                # If we have meta information from the keyword search, add it to scraped data
-                if page_url in meta_info_extracted and meta_info_extracted[page_url]:
-                    scraped_data["meta_info"] = meta_info_extracted[page_url]
-                
-                # Store scraped data
-                store_in_mongodb(scraped_data)
-                scraped_pages.append(page_url)
-                
-                # Log successful scraping
-                send_log(client_id, "success", f"Successfully scraped {page_url}")
-                
-                # Log page info
-                send_log(client_id, "detail", f"Page size: {scraped_data['network_metrics']['content_size_bytes'] / 1024:.1f} KB")
-                if 'duration_ms' in scraped_data['network_metrics'] and scraped_data['network_metrics']['duration_ms'] > 0:
-                    send_log(client_id, "detail", 
-                        f"Page loaded in {scraped_data['network_metrics']['duration_ms']} ms at " +
-                        f"speed: {scraped_data['network_metrics']['speed_kbps']:.1f} KB/s"
-                    )
-                
-                # Log content stats
-                text_count = len(scraped_data['content']['text_content'])
-                image_count = len(scraped_data['content']['images'])
-                send_log(client_id, "detail", f"Extracted {text_count + image_count} elements ({text_count} text, {image_count} images)")
-                
             except Exception as e:
-                error_msg = f"Error scraping {page_url}: {str(e)}"
+                error_msg = f"Error processing {current_url}: {str(e)}"
                 send_log(client_id, "error", error_msg)
-                print(f"Scraping exception: {error_msg}")
+                print(f"Processing exception: {error_msg}")
                 print(traceback.format_exc())
                 processing_status["errors"].append(error_msg)
             
+            # Update processing status periodically
+            processing_status["pages_found"] = len(visited_urls)
+            processing_status["pages_scraped"] = len(scraped_pages)
+            
+            # Update the project in MongoDB periodically (every 10 pages)
+            if pages_checked % 10 == 0:
+                update_project_partial_sync(
+                    thread_projects_collection,
+                    project_id,
+                    {
+                        "processing_status.pages_found": len(visited_urls),
+                        "processing_status.pages_scraped": len(scraped_pages)
+                    }
+                )
+                send_log(client_id, "info", f"Progress: {len(scraped_pages)} pages scraped, {len(visited_urls)} pages found, {url_queue.qsize()} pages queued")
+            
             # Check for interruption after each page
             if should_interrupt(client_id):
-                send_log(client_id, "warning", f"Scraping interrupted after processing {i+1} pages")
+                send_log(client_id, "warning", f"Crawling interrupted after processing {pages_checked} pages")
                 handle_interruption(client_id, loop, project_id, processing_status)
                 return
         
         # Update processing status with final counts
         processing_status["pages_scraped"] = len(scraped_pages)
+        processing_status["pages_found"] = len(visited_urls)
         processing_status["extraction_status"] = STATUS_COMPLETED
         processing_status["end_time"] = datetime.datetime.utcnow().isoformat()
         
@@ -597,28 +608,35 @@ def run_extraction_thread(
             project_id,
             {
                 "site_data.scraped_pages": scraped_pages,
+                "site_data.sitemap_pages": list(visited_urls),
                 "processing_status.pages_scraped": len(scraped_pages),
+                "processing_status.pages_found": len(visited_urls),
                 "processing_status.extraction_status": STATUS_COMPLETED,
                 "processing_status.end_time": processing_status["end_time"]
             }
         )
         
         # Final update to project with keyword match information
-        final_update = {
-            "processing_status.keyword_matches": keyword_matches,
-            "processing_status.keyword_contexts": keyword_contexts,
-            "processing_status.pages_with_keywords": pages_with_keywords,
-            "processing_status.pages_checked": pages_checked,
-            "processing_status.keyword_search_performed": search_keywords and len(search_keywords) > 0
-        }
+        if search_keywords and len(search_keywords) > 0:
+            final_update = {
+                "processing_status.keyword_matches": keyword_matches,
+                "processing_status.keyword_contexts": keyword_contexts,
+                "processing_status.pages_with_keywords": pages_with_keywords,
+                "processing_status.pages_checked": pages_checked,
+                "processing_status.keyword_search_performed": True
+            }
+            
+            update_project_partial_sync(
+                thread_projects_collection, 
+                project_id, 
+                final_update
+            )
         
-        update_project_partial_sync(
-            thread_projects_collection, 
-            project_id, 
-            final_update
-        )
+        send_log(client_id, "info", "Extraction process completed successfully")
+        send_log(client_id, "success", f"Final results: {len(scraped_pages)} pages scraped, {len(visited_urls)} pages found")
         
-        send_log(client_id, "info", "Extraction process completed")
+        if search_keywords and len(search_keywords) > 0:
+            send_log(client_id, "success", f"Found keywords on {pages_with_keywords} out of {pages_checked} pages checked")
         
         # Notify client of completion
         if client_id in message_queues:

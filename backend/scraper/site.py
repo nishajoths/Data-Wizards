@@ -8,6 +8,7 @@ import time
 import json
 import re
 from datetime import datetime
+from urllib.parse import urlparse, urljoin  # Add these imports
 
 def scrape_website(url):
     print(f"Scraping website: {url}")
@@ -97,6 +98,19 @@ def scrape_website(url):
                     "alt_text": img_tag.get('alt', '').strip()
                 })
         
+        # Extract links for tracking
+        links = []
+        for a_tag in soup.find_all('a', href=True):
+            href = a_tag.get('href')
+            if href and not href.startswith(('javascript:', '#')):
+                # Normalize URL
+                if not href.startswith(('http://', 'https://')):
+                    href = urljoin(url, href)  # Use urljoin to properly handle relative URLs
+                links.append({
+                    "href": href,
+                    "text": a_tag.get_text(strip=True)
+                })
+        
         # Extract text from images with metadata - skip this for performance
         image_texts = []
         # We'll skip OCR for performance reasons
@@ -113,12 +127,14 @@ def scrape_website(url):
                 "text_content": text_content,
                 "images": images,
                 "image_texts": image_texts,
-                "orders": orders
+                "orders": orders,
+                "links": links  # Add extracted links
             },
-            "network_metrics": network_metrics
+            "network_metrics": network_metrics,
+            "raw_html": response.text  # Store the raw HTML for link extraction
         }
         
-        print(f"Scraping completed: {len(text_content)} text elements, {len(images)} images")
+        print(f"Scraping completed: {len(text_content)} text elements, {len(images)} images, {len(links)} links")
         return structured_data
     except Exception as e:
         error_msg = f"Error parsing website content: {str(e)}"
@@ -131,7 +147,7 @@ def scrape_website(url):
             "url": url,
             "error": error_msg,
             "network_metrics": network_metrics,
-            "content": {"text_content": [], "images": [], "image_texts": [], "orders": []}
+            "content": {"text_content": [], "images": [], "image_texts": [], "orders": [], "links": []}
         }
 
 def extract_meta_info(soup, url):

@@ -1,10 +1,10 @@
-import { useState } from 'react';
-import { Label, Radio, TextInput, Card } from 'flowbite-react';
 import { HiInformationCircle } from 'react-icons/hi';
+import { Card, Label, Select } from 'flowbite-react';
 
 export interface ScrapingPreferences {
   scrape_mode: 'limited' | 'all';
   pages_limit: number;
+  max_depth: number;  // Include max_depth parameter
 }
 
 interface ScrapingOptionsProps {
@@ -13,21 +13,12 @@ interface ScrapingOptionsProps {
 }
 
 export default function ScrapingOptions({ preferences, onChange }: ScrapingOptionsProps) {
-  const handleModeChange = (mode: 'limited' | 'all') => {
+  // Handler for depth change
+  const handleDepthChange = (e: React.ChangeEvent<HTMLSelectElement>) => {
     onChange({
       ...preferences,
-      scrape_mode: mode
+      max_depth: parseInt(e.target.value)
     });
-  };
-
-  const handleLimitChange = (event: React.ChangeEvent<HTMLInputElement>) => {
-    const limit = parseInt(event.target.value, 10);
-    if (!isNaN(limit) && limit > 0) {
-      onChange({
-        ...preferences,
-        pages_limit: limit
-      });
-    }
   };
 
   return (
@@ -38,55 +29,38 @@ export default function ScrapingOptions({ preferences, onChange }: ScrapingOptio
       </h3>
       
       <div className="space-y-4">
+        <div className="bg-blue-50 border border-blue-200 p-4 rounded-lg">
+          <p className="text-blue-800">
+            <strong>Full Website Extraction:</strong> The application will extract data from all pages found in the sitemap.
+          </p>
+        </div>
+        
         <div>
-          <div className="mb-1 font-medium text-gray-700">How many pages would you like to scrape?</div>
-          
-          <div className="flex flex-col gap-3">
-            <div className="flex items-center">
-              <Radio
-                id="scrape-limited"
-                name="scrape-mode"
-                value="limited"
-                checked={preferences.scrape_mode === 'limited'}
-                onChange={() => handleModeChange('limited')}
-              />
-              <Label htmlFor="scrape-limited" className="ml-2 flex items-center">
-                <span>Limited number of pages</span>
-                {preferences.scrape_mode === 'limited' && (
-                  <div className="ml-3 flex items-center">
-                    <TextInput
-                      id="pages-limit"
-                      type="number"
-                      min={1}
-                      max={100}
-                      value={preferences.pages_limit}
-                      onChange={handleLimitChange}
-                      className="w-20"
-                    />
-                    <span className="ml-2 text-sm text-gray-500">pages</span>
-                  </div>
-                )}
-              </Label>
-            </div>
-            
-            <div className="flex items-center">
-              <Radio
-                id="scrape-all"
-                name="scrape-mode"
-                value="all"
-                checked={preferences.scrape_mode === 'all'}
-                onChange={() => handleModeChange('all')}
-              />
-              <div className="ml-2">
-                <Label htmlFor="scrape-all">
-                  Scrape all pages
-                </Label>
-                <p className="text-sm text-gray-500 mt-1">
-                  Note: This may take a long time for large websites and could cause higher server load.
-                </p>
-              </div>
-            </div>
-          </div>
+          <Label htmlFor="max-depth" className="mb-2 block">
+            Recursive Crawling Depth
+          </Label>
+          <Select 
+            id="max-depth"
+            value={preferences.max_depth}
+            onChange={handleDepthChange}
+            className="w-full"
+          >
+            <option value="1">1 - Only direct pages</option>
+            <option value="2">2 - Pages and their links</option>
+            <option value="3">3 - Deep crawling (recommended)</option>
+            <option value="4">4 - Very deep crawling</option>
+            <option value="5">5 - Extensive crawling (may be slow)</option>
+          </Select>
+          <p className="text-xs text-gray-600 mt-1">
+            Determines how deeply the crawler will follow links across the website.
+          </p>
+        </div>
+        
+        <div className="text-sm text-gray-600">
+          <p>
+            This application will automatically detect and process all pages from the website without limiting the number of pages.
+            For websites with a large number of pages, the extraction process may take longer to complete.
+          </p>
         </div>
       </div>
     </Card>

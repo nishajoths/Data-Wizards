@@ -63,16 +63,16 @@ export default function ProjectSuccess() {
     pages_found = 0, 
     pages_scraped = 0, 
     errors = [], 
-    scrape_mode = 'limited', 
-    pages_limit = 5 
+    scrape_mode = 'all',  // Default to 'all' instead of 'limited'
+    pages_limit = 0       // Default to 0 indicating no limit
   }:any = processing_status ?? {
     robots_status: 'not_processed',
     sitemap_status: 'not_processed',
     pages_found: 0,
     pages_scraped: 0,
     errors: [],
-    scrape_mode: 'limited',
-    pages_limit: 5,
+    scrape_mode: 'all',
+    pages_limit: 0,
   };
 
   const getStatusIcon = (status: string) => {
@@ -140,9 +140,7 @@ export default function ProjectSuccess() {
                 <div className="ml-3">
                   <h3 className="font-medium">Scraping Mode</h3>
                   <p className="text-sm text-gray-500">
-                    {scrape_mode === 'all'
-                      ? 'All pages were targeted for scraping'
-                      : `Limited to ${pages_limit || 5} pages`}
+                    All pages were processed without limitation
                   </p>
                 </div>
               </div>
