@@ -1,7 +1,7 @@
 from groq import Groq
 
 class ScrapingAssistant:
-    def __init__(self, api_key='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'):
+    def __init__(self, api_key='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'):
         # Initialize Groq client
         self.client = Groq(api_key=api_key)
 
